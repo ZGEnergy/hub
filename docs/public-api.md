@@ -77,7 +77,7 @@ two:
           "interval": "monthly",
           "intervalCount": 1,
           "unitAmount": 0,
-          "currency": "eur",
+          "currency": "usd",
           "tooltip": null
         }
       ]
@@ -108,7 +108,7 @@ two:
           "interval": "monthly",
           "intervalCount": 1,
           "unitAmount": 1500,
-          "currency": "eur",
+          "currency": "usd",
           "tooltip": "Seats are Hub members and pending invitations. People who only trigger agents through GitHub, Slack, or Discord do not count as seats."
         }
       ]
@@ -123,7 +123,7 @@ validated template the instance enforces, so a plan's advertised numbers and its
 cannot disagree. Render these rather than writing the numbers into your own copy; `features` is
 prose that no template can contradict.
 
-`unitAmount` is the amount per billing unit in the smallest currency unit (cents for `eur`),
+`unitAmount` is the amount per billing unit in the smallest currency unit (cents for `usd`),
 matching Stripe's own `Price` convention; a free plan prices at `0`. An interval is absent when the
 plan has no active price at that interval. `slug` is catalog identity and does not change with the
 displayed `name`. A self-hosted instance without `STRIPE_SECRET_KEY` 404s this route rather than

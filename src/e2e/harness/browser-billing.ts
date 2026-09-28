@@ -30,7 +30,7 @@ export interface FixtureBillingPrice {
  *   cancellation: one seat, no invitations, and a monthly execution allowance. The allowance is
  *   authored in Stripe metadata, so this number and `ent_executions_monthly_limit` on the live
  *   Free product have to agree.
- * - `hosted` is the one purchasable plan: Pro, €15 per seat per month, monthly only. There is no
+ * - `hosted` is the one purchasable plan: Pro, $15 per seat per month, monthly only. There is no
  *   annual price, so the picker has no interval to switch between. The slug stays `hosted`; the
  *   customer-facing name is Hub's, in `src/billing/plan-presentation.ts`.
  *
@@ -71,7 +71,7 @@ export const FIXTURE_BILLING_PRICES: readonly FixtureBillingPrice[] = [
     productId: "prod_fixture_free",
     lookupKey: "free_monthly",
     active: true,
-    currency: "eur",
+    currency: "usd",
     unitAmount: 0,
     interval: "month",
   },
@@ -80,7 +80,7 @@ export const FIXTURE_BILLING_PRICES: readonly FixtureBillingPrice[] = [
     productId: "prod_fixture_hosted",
     lookupKey: "hosted_monthly",
     active: true,
-    currency: "eur",
+    currency: "usd",
     unitAmount: 1500,
     interval: "month",
   },

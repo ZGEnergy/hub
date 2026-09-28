@@ -4336,9 +4336,9 @@ class HubUser {
       FREE_PLAN_NAME,
       HOSTED_PLAN_NAME,
     ]);
-    await expect(dialog).toContainText("€15");
+    await expect(dialog).toContainText("$15");
     await expect(dialog).toContainText("per seat / month");
-    await expect(dialog).toContainText("€0");
+    await expect(dialog).toContainText("$0");
     await expect(dialog).toContainText("forever");
     // Each column states its own figures, from the catalog rather than from copy.
     await expect(dialog).toContainText(`${FIXTURE_FREE_EXECUTIONS} agent runs a month`);
@@ -5755,7 +5755,7 @@ const FIXTURE_FREE_PLAN_EXPECTATION: PublicBillingPlanExpectation = {
       interval: "monthly",
       intervalCount: 1,
       unitAmount: 0,
-      currency: "eur",
+      currency: "usd",
       tooltip: null,
     },
   ],
@@ -5793,7 +5793,7 @@ const FIXTURE_BILLING_PLAN_EXPECTATIONS: readonly PublicBillingPlanExpectation[]
         interval: "monthly",
         intervalCount: 1,
         unitAmount: 1500,
-        currency: "eur",
+        currency: "usd",
         tooltip:
           "Seats are Hub members and pending invitations. People who only trigger agents through GitHub, Slack, or Discord do not count as seats.",
       },

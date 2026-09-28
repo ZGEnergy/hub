@@ -19,18 +19,18 @@ import {
   subscriptionSummary,
 } from "./presentation.js";
 
-const euros = (unitAmount: number, interval: BillingPlanPriceInterval = "monthly") => ({
+const dollars = (unitAmount: number, interval: BillingPlanPriceInterval = "monthly") => ({
   interval,
   intervalCount: 1 as const,
   unitAmount,
-  currency: "eur",
+  currency: "usd",
   tooltip: null,
 });
 
 function plan(
   slug: string,
   name: string,
-  prices: Partial<Record<BillingPlanPriceInterval, ReturnType<typeof euros>>>,
+  prices: Partial<Record<BillingPlanPriceInterval, ReturnType<typeof dollars>>>,
   included: PublicBillingPlan["included"] = { seats: null, executionsPerMonth: null },
 ): PublicBillingPlan {
   return {
@@ -64,18 +64,18 @@ function subscription(
 }
 
 it("prices a paid plan as a figure the customer can read at a glance", () => {
-  assert.deepEqual(planPrice(euros(1500), "monthly"), {
-    amount: "€15",
+  assert.deepEqual(planPrice(dollars(1500), "monthly"), {
+    amount: "$15",
     unit: "per seat / month",
   });
-  assert.deepEqual(planPrice(euros(15000, "annual"), "annual"), {
-    amount: "€150",
+  assert.deepEqual(planPrice(dollars(15000, "annual"), "annual"), {
+    amount: "$150",
     unit: "per seat / year",
   });
 });
 
 it("prices the free tier as a figure so every plan column shares a baseline", () => {
-  assert.deepEqual(planPrice(euros(0), "monthly"), { amount: "€0", unit: "forever" });
+  assert.deepEqual(planPrice(dollars(0), "monthly"), { amount: "$0", unit: "forever" });
 });
 
 it("says which interval is missing rather than showing a blank price", () => {
@@ -83,7 +83,7 @@ it("says which interval is missing rather than showing a blank price", () => {
 });
 
 it("keeps the plan name in the button's accessible name while the visible label stays short", () => {
-  const action = planAction({ planName: "Paseo Hub", price: euros(1500), isCurrent: false });
+  const action = planAction({ planName: "Paseo Hub", price: dollars(1500), isCurrent: false });
   assert.deepEqual(action, {
     label: "Subscribe",
     name: "Subscribe to Paseo Hub",
@@ -96,7 +96,7 @@ it("keeps the plan name in the button's accessible name while the visible label 
 });
 
 it("disables the plan the organization is already on and names it", () => {
-  const action = planAction({ planName: "Free", price: euros(0), isCurrent: true });
+  const action = planAction({ planName: "Free", price: dollars(0), isCurrent: true });
   assert.deepEqual(action, { label: "Current plan", name: "Current plan: Free", disabled: true });
 });
 
@@ -109,7 +109,7 @@ it("disables a plan the catalog does not price at the selected interval", () => 
 });
 
 it("leads a plan's list with its own figures, then the words the plan author wrote", () => {
-  const free = plan("free", "Free", { monthly: euros(0) }, { seats: 1, executionsPerMonth: 50 });
+  const free = plan("free", "Free", { monthly: dollars(0) }, { seats: 1, executionsPerMonth: 50 });
 
   assert.deepEqual(
     planFeatures({
@@ -125,13 +125,13 @@ it("leads a plan's list with its own figures, then the words the plan author wro
 });
 
 it("says unlimited where a plan has no cap, and counts seats in the plural", () => {
-  assert.deepEqual(planFeatures(plan("hosted", "Pro", { monthly: euros(1500) })).slice(0, 2), [
+  assert.deepEqual(planFeatures(plan("hosted", "Pro", { monthly: dollars(1500) })).slice(0, 2), [
     { key: "included-executions", label: "Unlimited agent runs", tooltip: null },
     { key: "included-seats", label: "Unlimited seats", tooltip: null },
   ]);
   assert.deepEqual(
     planFeatures(
-      plan("team", "Team", { monthly: euros(9900) }, { seats: 5, executionsPerMonth: 2000 }),
+      plan("team", "Team", { monthly: dollars(9900) }, { seats: 5, executionsPerMonth: 2000 }),
     ).slice(0, 2),
     [
       { key: "included-executions", label: "2000 agent runs a month", tooltip: null },
@@ -141,8 +141,8 @@ it("says unlimited where a plan has no cap, and counts seats in the plural", () 
 });
 
 it("counts Free as a plan on the page but not as something to buy", () => {
-  const free = plan("free", "Free", { monthly: euros(0) });
-  const pro = plan("hosted", "Pro", { monthly: euros(1500) });
+  const free = plan("free", "Free", { monthly: dollars(0) });
+  const pro = plan("hosted", "Pro", { monthly: dollars(1500) });
 
   assert.deepEqual(purchasablePlans([free, pro]), [pro]);
   assert.deepEqual(purchasablePlans([free]), []);
@@ -150,15 +150,15 @@ it("counts Free as a plan on the page but not as something to buy", () => {
 
 it("hides the interval switch for a catalog that only charges monthly", () => {
   const plans = [
-    plan("free", "Free", { monthly: euros(0), annual: euros(0, "annual") }),
-    plan("starter", "Starter", { monthly: euros(1500) }),
+    plan("free", "Free", { monthly: dollars(0), annual: dollars(0, "annual") }),
+    plan("starter", "Starter", { monthly: dollars(1500) }),
   ];
   assert.deepEqual(offeredIntervals(plans), ["monthly"]);
   assert.deepEqual(
     offeredIntervals([
       plan("starter", "Starter", {
-        monthly: euros(1500),
-        annual: euros(15000, "annual"),
+        monthly: dollars(1500),
+        annual: dollars(15000, "annual"),
       }),
     ]),
     ["monthly", "annual"],
