@@ -2612,6 +2612,15 @@ class PgDatabase implements Database {
     return rows.rows[0] === undefined ? undefined : toOperatorOrganizationRecord(rows.rows[0]);
   }
 
+  async findOrganizationSlugById(organizationId: string): Promise<string | undefined> {
+    const rows = await query<{ slug: string }>(
+      this.pool,
+      `select slug from organization where id = $1 limit 1`,
+      [organizationId],
+    );
+    return rows.rows[0]?.slug;
+  }
+
   async consumeOrganizationUsage(
     input: ConsumeOrganizationUsageInput,
   ): Promise<OrganizationUsageRecord | undefined> {

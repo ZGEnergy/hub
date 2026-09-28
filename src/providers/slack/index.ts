@@ -18,6 +18,7 @@ import type { BindSlackConnectionInput, Database, SlackConnectionRecord } from "
 import { reportFailure } from "../../failures/index.js";
 import { createSlackBotClient, type SlackBotClient } from "../../triggers/slack/client.js";
 import { createSlackTriggerProvider } from "../../triggers/slack/provider.js";
+import { organizationBillingUrl } from "../../triggers/failure-notice.js";
 import { createSlackAttachmentResolver } from "../../triggers/slack/attachments.js";
 import { createSlackReplyExecutor } from "../../triggers/slack/reply.js";
 import { outputContextProvider, replyOutputTool } from "../../execution-capabilities/outputs.js";
@@ -166,6 +167,8 @@ export function createSlackRegistration(
       ({ configurationStoreForProject, attachments }) =>
         createSlackTriggerProvider({
           configurationStoreForProject,
+          billingUrlForOrganization: (organizationId) =>
+            organizationBillingUrl(database, options.publicBaseUrl!, organizationId),
           ...(attachments === undefined ? {} : { attachments }),
           botUserIdForWorkspace: async (organizationId, teamId) =>
             (await findSlackBindingForOrganization(database, organizationId, teamId))?.botUserId,
