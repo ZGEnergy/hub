@@ -101,7 +101,7 @@ export function priceForInterval(
   return plan.prices.find((price) => price.interval === interval) ?? null;
 }
 export interface PlanPrice {
-  /** The headline figure — "€15", "Free", or "—" when this interval has no price. */
+  /** The headline figure — "$15", "Free", or "—" when this interval has no price. */
   amount: string;
   /** The unit line under the figure — never repeats the figure. */
   unit: string;
