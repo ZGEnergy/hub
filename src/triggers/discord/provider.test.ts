@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import { createMemoryDatabase } from "../../db/memory.js";
 import { createAttachmentCapabilityRegistry } from "../../attachments/capabilities.js";
 import { createActiveProjectConfiguration } from "../../test-utils/project-configuration.js";
@@ -9,6 +9,41 @@ import type { NormalizedDiscordMessageEvent } from "./events.js";
 import { isAcceptedTriggerProviderMatch } from "../index.js";
 
 describe("Discord Phase 1 trigger provider", () => {
+  it("explains a monthly execution denial in the originating thread", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-28T23:00:00Z"));
+    try {
+      const { project, revision, store } = await activeConfiguration();
+      const bot = new MemoryDiscordBotClient({ selfUserId: "900" });
+      const provider = createDiscordTriggerProvider({
+        configurationStoreForProject: () => store,
+        bot,
+        billingUrlForOrganization: async () => "https://hub.paseo.sh/o/acme/settings/billing",
+      });
+      const match = (
+        await provider.match(external(project.id, revision.id, event({ threadId: "207" })))
+      )[0];
+      if (!isAcceptedTriggerProviderMatch(match)) throw new Error("expected accepted match");
+      await provider.onAgentExecutionFailed?.(
+        match.triggerContext,
+        match.outputContext,
+        JSON.stringify({
+          error: "entitlement_denied",
+          entitlement: "executions.monthly",
+          kind: "meter",
+          limit: 50,
+          current: 236,
+        }),
+      );
+      assert.equal(
+        bot.messages[0]?.content,
+        "This org has used its 50 free runs for September. Runs reset on October 1, or upgrade to Pro under Billing: https://hub.paseo.sh/o/acme/settings/billing",
+      );
+      assert.equal(bot.messages[0]?.threadId, "207");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   it("shares an agent identity across a root message and its Discord thread", async () => {
     const { project, revision, store } = await activeConfiguration();
     const provider = createDiscordTriggerProvider({

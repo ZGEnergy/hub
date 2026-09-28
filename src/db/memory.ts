@@ -2701,6 +2701,11 @@ class MemoryDatabase implements Database {
     return this.operatorOrganizations().find((organization) => organization.slug === slug);
   }
 
+  async findOrganizationSlugById(organizationId: string): Promise<string | undefined> {
+    return this.operatorOrganizations().find((organization) => organization.id === organizationId)
+      ?.slug;
+  }
+
   /** Distinct organizations derived from the membership fixtures — the in-memory store models
    * organizations only through those, so the operator picker reads the same source. */
   private operatorOrganizations(): OperatorOrganizationRecord[] {

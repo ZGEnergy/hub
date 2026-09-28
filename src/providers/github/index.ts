@@ -25,6 +25,7 @@ import {
   createGitHubTriggerProvider,
   type GitHubReactionClient,
 } from "../../triggers/github/provider.js";
+import { organizationBillingUrl } from "../../triggers/failure-notice.js";
 import { createWebhookSource } from "../../triggers/github/webhook.js";
 import {
   createGitHubConnectionClient,
@@ -156,6 +157,23 @@ export function createGitHubRegistration(
   const githubConfiguration =
     options.configurationProvider ?? createGitHubConfigurationProvider(appAuth);
   const reactions = options.reactionClient ?? createGitHubReactionClient(appAuth);
+  const comments = {
+    async createIssueComment(input: {
+      installationId: number;
+      owner: string;
+      repo: string;
+      issueNumber: number;
+      body: string;
+    }) {
+      const octokit = await appAuth.createInstallationOctokit(input.installationId);
+      await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+        owner: input.owner,
+        repo: input.repo,
+        issue_number: input.issueNumber,
+        body: input.body,
+      });
+    },
+  };
   logger.info("using webhook event source");
   return {
     configurationSnapshot: {
@@ -231,6 +249,9 @@ export function createGitHubRegistration(
         return createGitHubTriggerProvider({
           configurationStoreForProject,
           reactions,
+          comments,
+          billingUrlForOrganization: (organizationId) =>
+            organizationBillingUrl(database, options.publicBaseUrl!, organizationId),
         });
       },
     ],
@@ -240,19 +261,7 @@ export function createGitHubRegistration(
         type: "github.reply",
         tool: replyOutputTool,
         available: githubReplyAvailable,
-        execute: createGitHubReplyExecutor({
-          client: {
-            async createIssueComment(input) {
-              const octokit = await appAuth.createInstallationOctokit(input.installationId);
-              await octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/comments", {
-                owner: input.owner,
-                repo: input.repo,
-                issue_number: input.issueNumber,
-                body: input.body,
-              });
-            },
-          },
-        }),
+        execute: createGitHubReplyExecutor({ client: comments }),
       },
     ],
     requests: [{ name: "webhook", handle: (request) => webhook.handle(request) }],

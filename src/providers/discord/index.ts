@@ -19,6 +19,7 @@ import {
 import { createDiscordBotClient, type DiscordBotClient } from "../../triggers/discord/bot.js";
 import { createDiscordGatewaySource } from "../../triggers/discord/gateway.js";
 import { createDiscordTriggerProvider } from "../../triggers/discord/provider.js";
+import { organizationBillingUrl } from "../../triggers/failure-notice.js";
 import { createDiscordAttachmentResolver } from "../../triggers/discord/attachments.js";
 import { createDiscordReplyExecutor } from "../../triggers/discord/reply.js";
 import { outputContextProvider, replyOutputTool } from "../../execution-capabilities/outputs.js";
@@ -112,6 +113,8 @@ export function createDiscordRegistration(
       ({ configurationStoreForProject, attachments }) =>
         createDiscordTriggerProvider({
           configurationStoreForProject,
+          billingUrlForOrganization: (organizationId) =>
+            organizationBillingUrl(database, options.publicBaseUrl!, organizationId),
           ...(attachments === undefined ? {} : { attachments }),
           bot,
         }),

@@ -8,6 +8,12 @@ import {
 import type { GitHubAuth } from "../../auth/github.js";
 import { reportFailure } from "../../failures/index.js";
 import {
+  agentFailureNotice,
+  isExecutionLimitDenial,
+  missingBillingUrl,
+} from "../failure-notice.js";
+import type { GitHubReplyClient } from "./reply.js";
+import {
   matchTriggers,
   readGitHubInvocationMessage,
   readGitHubInvocationParserMessage,
@@ -128,6 +134,7 @@ export type GitHubReactionSubject =
 
 export interface GitHubTriggerContext {
   provider: "github";
+  organizationId: string;
   target: { installationId: number; repository: string };
   event: GitHubMergeData;
   reactionSubject: GitHubReactionSubject | null;
@@ -141,6 +148,8 @@ interface GitHubReactionState {
 export function createGitHubTriggerProvider(options: {
   configurationStoreForProject: (projectId: string) => ProjectConfigurationStore;
   reactions: GitHubReactionClient;
+  comments?: GitHubReplyClient;
+  billingUrlForOrganization?: (organizationId: string) => Promise<string>;
 }): TriggerProvider<"github", GitHubTriggerContext> {
   return {
     name: "github",
@@ -171,6 +180,7 @@ export function createGitHubTriggerProvider(options: {
           throw new Error(`compiled trigger not found: ${match.trigger.name}`);
         const triggerContext: GitHubTriggerContext = {
           provider: "github",
+          organizationId: externalTrigger.organizationId,
           target: { installationId: event.installationId, repository: event.repo },
           event: buildGitHubMergeData(event),
           reactionSubject: reactionSubjectForEvent(event),
@@ -226,7 +236,28 @@ export function createGitHubTriggerProvider(options: {
     async onAgentExecutionCompleted(triggerContext, _outputContext, _result, reactionState) {
       return reactToLifecycle(options.reactions, triggerContext, "+1", reactionState);
     },
-    async onAgentExecutionFailed(triggerContext, _outputContext, _reason, reactionState) {
+    async onAgentExecutionFailed(triggerContext, _outputContext, reason, reactionState) {
+      if (isExecutionLimitDenial(reason) && triggerContext.event.github.item?.number != null) {
+        if (options.comments === undefined) throw new Error("GitHub comment client unavailable");
+        const [owner, repo] = splitRepo(triggerContext.target.repository);
+        await options.comments.createIssueComment({
+          installationId: triggerContext.target.installationId,
+          owner,
+          repo,
+          issueNumber: triggerContext.event.github.item.number,
+          body: await agentFailureNotice(
+            reason,
+            triggerContext.organizationId,
+            options.billingUrlForOrganization ?? missingBillingUrl,
+          ),
+        });
+        await deleteReactionSafely(
+          options.reactions,
+          triggerContext,
+          githubReactionId(reactionState),
+        );
+        return null;
+      }
       return reactToLifecycle(options.reactions, triggerContext, "-1", reactionState);
     },
     async onMachineTerminated(triggerContext, _reason, reactionState) {
