@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.10.0 - 2026-09-29
+
+### Added
+
+- Scheduled triggers that run on a calendar recurrence, with time zones.
+- Conversation continuity: a new arrival in the same issue, pull request, or thread continues the agent already working there instead of starting another, with explicit keys and an opt-out.
+- A new arrival for a running agent steers it, including agents that run with scoped execution credentials.
+- A Home page for new organizations with a setup checklist, a notice when provider events arrive with no trigger listening, and a seven-day overview.
+- Saving a trigger validates its agent against the target daemon, so a model, mode, or provider the daemon cannot run is refused at save instead of failing the first run.
+- A `startup_timeout` setting for machines that need longer than the default two minutes to start an agent.
+
+### Changed
+
+- Upgrade Paseo daemons before upgrading Hub: conversation continuity needs the current daemon.
+- One consistent interface across sign-in, organization administration, projects, connections, triggers, and instance settings.
+- The trigger editor walks four numbered steps: what arrives, who may send it, where it lands, and what runs there.
+- Trigger forms list only the events Hub handles, and label events require the label they match.
+- Alerts say what happened, and empty pages no longer draw empty tables and panels.
+- Paseo shows Hub executions under their trigger's name instead of an execution id.
+
+### Fixed
+
+- Active agents keep their execution credentials across Hub restarts and reconnect to the same daemon agent.
+- Long rendered prompts reach the agent in full.
+- New GitHub agents receive their reply tool, and preserved legacy workflows dispatch again.
+- The sidebar and breadcrumb stay on the page that is visible while the next one loads.
+- Unsupported methods on the execution MCP route return 405 instead of an HTML page or a 500, and a daemon sending an invalid WebSocket close code no longer crashes Hub.
+
 ## 0.9.0 - 2026-09-04
 
 ### Added
