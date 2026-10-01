@@ -73,7 +73,8 @@ export const decidePaseoConnectorConsent = createServerFn({ method: "POST" })
     }
   });
 
-export const describePaseoConnectorConsent = createServerFn({ method: "GET" })
+/** POST so the signed query never lands in a request URL or an access log. A read: session only. */
+export const describePaseoConnectorConsent = createServerFn({ method: "POST" })
   .validator(describeConsentSchema)
   .handler(async ({ data }): Promise<Result<ConnectorConsentSummary>> => {
     try {

@@ -89,8 +89,8 @@ export interface DescribeConnectorConsentInput {
 export interface ConnectorConsentSummary {
   /** The name the OAuth client registered for itself, unverified; null when it gave none. */
   clientName: string | null;
-  /** Where the browser returns after the decision, from the signed `redirect_uri`. */
-  redirectOrigin: string | null;
+  /** Where the browser and the code go after the decision, from the signed `redirect_uri`. */
+  redirectTarget: string | null;
   machineName: string;
   organizationName: string;
   workingDirectory: string;
@@ -270,7 +270,7 @@ export async function describeConnectorConsent(
   const clientId = params.get("client_id");
   return {
     clientName: clientId === null ? null : await context.oauthClientName(clientId),
-    redirectOrigin: urlOrigin(params.get("redirect_uri")),
+    redirectTarget: redirectDestination(params.get("redirect_uri")),
     machineName: machine.name,
     organizationName: machine.organizationName,
     workingDirectory: connection.workingDirectory,
@@ -299,13 +299,15 @@ async function pendingFlow(
   return { flow, oauthQuery, now };
 }
 
-function urlOrigin(value: string | null): string | null {
-  if (value === null) return null;
-  try {
-    return new URL(value).origin;
-  } catch {
-    return null;
-  }
+/**
+ * Where a redirect URI sends the browser, for display: its origin, or for a custom scheme (whose
+ * URL origin is the opaque string "null") its scheme and host, or the scheme alone.
+ */
+export function redirectDestination(value: string | null): string | null {
+  if (value === null || !URL.canParse(value)) return null;
+  const url = new URL(value);
+  if (url.origin !== "null") return url.origin;
+  return url.host === "" ? url.protocol : `${url.protocol}//${url.host}`;
 }
 
 export async function listConnectorConnections(

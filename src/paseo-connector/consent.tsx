@@ -331,16 +331,17 @@ export function ConnectorConsent() {
       if (result.status === "ok") window.location.assign(result.data.redirectTo);
     },
   });
-  const submit = useCallback(
-    (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
+  // Each button carries its own decision. Nothing is inferred from a form submission, so no path
+  // (a missing SubmitEvent.submitter, requestSubmit, the Enter key) can approve without Approve.
+  const decideWith = useCallback(
+    (accept: boolean) => {
       if (request === undefined || flowId === undefined) return;
-      const submitter = "submitter" in event.nativeEvent ? event.nativeEvent.submitter : undefined;
-      const accept = !(submitter instanceof HTMLButtonElement && submitter.value === "deny");
       decide.mutate({ data: { oauthQuery: request.query, flowId, accept } });
     },
     [decide, flowId, request],
   );
+  const approve = useCallback(() => decideWith(true), [decideWith]);
+  const deny = useCallback(() => decideWith(false), [decideWith]);
   const reload = useCallback(() => void summary.refetch(), [summary]);
 
   if (!usable) {
@@ -406,7 +407,7 @@ export function ConnectorConsent() {
             </RecordRow>
           ))}
         </RecordList>
-        <form className="grid gap-4" onSubmit={submit} aria-label={CONSENT_TITLE}>
+        <div className="grid gap-4" role="group" aria-label="Decision">
           {failed ? (
             <FailureAlert
               title="Decision not recorded"
@@ -416,14 +417,14 @@ export function ConnectorConsent() {
             />
           ) : null}
           <FormActions>
-            <Button type="submit" name="decision" value="deny" variant="outline" disabled={busy}>
+            <Button type="button" variant="outline" disabled={busy} onClick={deny}>
               Deny
             </Button>
-            <Button type="submit" name="decision" value="approve" disabled={busy}>
+            <Button type="button" disabled={busy} onClick={approve}>
               Approve
             </Button>
           </FormActions>
-        </form>
+        </div>
       </Card>
     </>
   );
@@ -436,12 +437,16 @@ function ConsentSummary({ summary }: { summary: ConnectorConsentSummary }) {
         label: "App",
         value: (
           <TwoLine
-            primary={summary.clientName ?? "Unnamed app"}
-            {...(summary.redirectOrigin === null
-              ? {}
-              : { secondary: `Returns to ${summary.redirectOrigin}` })}
+            primary={summary.clientName ?? "No name given"}
+            secondary="Name provided by the app itself, not verified by Hub"
             wrap
           />
+        ),
+      },
+      {
+        label: "Approval sends you and the access code to",
+        value: (
+          <span className="font-mono">{summary.redirectTarget ?? "An unreadable address"}</span>
         ),
       },
       {

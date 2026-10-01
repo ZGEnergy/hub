@@ -17,7 +17,12 @@ import {
 import type { Database } from "../db/types.js";
 import { authorizeConnectorRequest } from "./authorization.js";
 import { ConnectorError } from "./contracts.js";
-import { CONNECTOR_FLOW_PARAM, ConnectorFlowError, type ConnectorOAuthService } from "./flow.js";
+import {
+  CONNECTOR_FLOW_PARAM,
+  ConnectorFlowError,
+  redirectDestination,
+  type ConnectorOAuthService,
+} from "./flow.js";
 import { connectorOAuthEndpoints, verifyConnectorAccessToken } from "./oauth.js";
 import { startApplication, stopApplication } from "../server/runtime.js";
 import { Route as AuthorizationServerRoute } from "../routes/[.]well-known/oauth-authorization-server.js";
@@ -45,6 +50,18 @@ const tokenResponseSchema = z.object({
 });
 type Tokens = z.infer<typeof tokenResponseSchema>;
 const oauthErrorSchema = z.object({ error: z.string() }).passthrough();
+
+describe("consent redirect destination", () => {
+  it("never shows a custom scheme's opaque origin", () => {
+    expect(redirectDestination("https://chatgpt.com/connector/oauth/cb?x=1")).toBe(
+      "https://chatgpt.com",
+    );
+    expect(redirectDestination("myapp://callback/path")).toBe("myapp://callback");
+    expect(redirectDestination("com.example.app:/oauth")).toBe("com.example.app:");
+    expect(redirectDestination("not a url")).toBeNull();
+    expect(redirectDestination(null)).toBeNull();
+  });
+});
 
 describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", (kind) => {
   let root: string;
@@ -658,7 +675,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
 
     expect(await connector.describeConsent(consent, browser.headers())).toEqual({
       clientName: "Dotty",
-      redirectOrigin: new URL(REDIRECT_URI).origin,
+      redirectTarget: new URL(REDIRECT_URI).origin,
       machineName: `devbox-${machine.slice(0, 8)}`,
       organizationName: "Acme",
       workingDirectory: "/srv/work/project",
