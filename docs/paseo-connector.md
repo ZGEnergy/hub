@@ -108,7 +108,15 @@ them cannot link.
   The `resource` sent at authorization is not checked there; it is only bound into the linking flow. Every
   access token's audience is the canonical `<origin>/mcp/paseo`.
 - **Scopes.** Request at least one connector scope (`paseo:read`, `paseo:run`, `paseo:cancel`), and
-  `offline_access` to receive a refresh token. See [Scopes](#scopes).
+  `offline_access` to receive a refresh token, explicitly in `scope` at authorization (least privilege). See
+  [Scopes](#scopes).
+  - A registration whose `scope` names anything outside those four is refused with `invalid_scope`.
+  - An authorization whose `scope` names anything outside the client's registered scopes is redirected
+    back to the client with `error=invalid_scope`.
+  - An authorization that omits `scope` gets the client's registered scopes (all four if the registration
+    also omitted it). The pinned library writes that default into the signed request Hub binds the link
+    to, so the consent screen shows, and the user approves, exactly those scopes. Linking is refused at
+    machine selection only when they contain no connector scope.
 - **Discovery from the `401`.** Read `resource_metadata` from the `WWW-Authenticate` challenge, fetch the
   protected-resource metadata, then the authorization-server metadata. Treat `error="invalid_token"` as
   "link again".
@@ -161,7 +169,7 @@ The same steps apply to every client. Client-specific notes are under
    absolute working directory, such as `/srv/work/project`. Hub never falls back to the daemon's own
    working directory.
 6. The consent page shows the app name the client registered (labelled as provided by the app itself, not
-   verified by Hub), where it will return to, the machine, the directory and the scopes. Approving activates
+   verified by Hub; "No name given" when it sent none), where it will return to, the machine, the directory and the scopes. Approving activates
    the connection. Denying discards it; the client must start again.
 7. The client exchanges the code and calls the tools.
 
@@ -293,8 +301,15 @@ appear in it.
   although every dynamically registered client is public. Both lists are fixed by the pinned library.
 - **Registration growth.** Registration is unauthenticated, and Hub never deletes registered clients. Some
   clients register a new client on every fresh connection.
-- **Omitted `scope` at authorization is untested.** Clients should request scopes explicitly. A request with
-  no connector scope at all is refused at machine selection.
+- **Registration rate limiting is weak (operator hardening).** The pinned library's only limit on
+  registration is 5 requests per 60 seconds, and it applies only when `NODE_ENV=production`: Hub sets no
+  rate-limit option of its own, and the Dockerfile, `compose.yml` and `npm start` do not set
+  `NODE_ENV=production` (`fly.toml` does). The counters live in process memory, so a restart clears them.
+  They are keyed on `x-forwarded-for`, or on the header named by `PASEO_HUB_TRUSTED_CLIENT_IP_HEADER` when
+  set, so unless a trusted proxy overwrites that header a caller can vary it to get fresh buckets. With no
+  client-IP header at all, every caller shares one bucket: anyone can exhaust it and block new links for
+  everyone, and a client that registers on every fresh connection spends it quickly. Put Hub behind a proxy
+  that sets a trustworthy client-IP header, and name that header in `PASEO_HUB_TRUSTED_CLIENT_IP_HEADER`.
 - **No automatic reconciliation** of a launch interrupted by a Hub restart (see [Request keys](#request-keys)).
 
 ## Evidence
@@ -309,8 +324,9 @@ Three kinds of evidence, which say different things:
    client. It shows that the two clients see the same tools and runtime catalog, that each one's provider
    choice is honoured independently of the client, that their connections and agents are isolated from
    each other (one user and two users), that codes, refresh tokens and revocations are bound to their own
-   client, that `127.0.0.1` redirects may change port while `localhost` may not, and that Connected apps
-   names each client. `src/paseo-connector/oauth.integration.test.ts` covers the resource rules.
+   client, that `127.0.0.1` redirects may change port while `localhost` may not, that Connected apps
+   names each client, and that an authorization without `scope` links with the client's registered scopes
+   shown at consent (or is refused at machine selection when they hold no connector scope). `src/paseo-connector/oauth.integration.test.ts` covers the resource rules.
 2. **Real local protocol and lifecycle: the connector E2E.** A real Hub production build, a source-built Paseo
    daemon, a real Claude Code coding-agent runtime on that daemon, Hub's screens in Chromium, and the
    official MCP TypeScript SDK as the client. See [Local verification](#local-verification). The Claude
@@ -373,10 +389,12 @@ Status: not verified with this server.
   connection" ([auth](https://claude.com/docs/connectors/building/authentication)). Hub does not advertise
   CIMD, so DCR is the documented path. Connected apps may show several Claude-registered entries over time.
 - **Callback.** claude.ai web, Desktop, mobile and Cowork use `https://claude.ai/api/mcp/auth_callback`.
-  Claude Code uses an RFC 8252 loopback redirect on an ephemeral port and declares both
-  `http://localhost/callback` and `http://127.0.0.1/callback`
-  ([auth](https://claude.com/docs/connectors/building/authentication)). Hub accepts the `127.0.0.1` form on
-  any port; the `localhost` form only on the port registered.
+  Claude Code uses an RFC 8252 loopback redirect on an ephemeral port, and Claude's docs ask servers to
+  accept both `http://localhost/callback` and `http://127.0.0.1/callback` on any port
+  ([auth](https://claude.com/docs/connectors/building/authentication)). Hub, through the pinned library,
+  allows a different port only for the loopback IP literals `127.0.0.1` and `::1`. A `localhost` callback on
+  an ephemeral port other than the registered one is refused with `invalid_redirect`. Which of the two
+  forms Claude Code actually sends is not documented, so whether it can link is not verified.
 - **Resource.** Claude sends the canonical server URL as `resource` on authorization and token requests
   ([troubleshooting](https://claude.com/docs/connectors/building/troubleshooting)); Hub accepts canonically
   equal values.
@@ -457,4 +475,14 @@ revocation ends the connection the other steps use.
 Not covered here: a public HTTPS origin, any hosted MCP client, refresh-token exchange, and re-enrolling a
 daemon.
 
-Provider-neutral revision: `<revision evidence: filled by controller>`
+### Provider-neutral revision
+
+Local protocol and lifecycle evidence only; it is not evidence that any hosted client works.
+
+- At commit `e3f903a`: `RUN_HUB_CONNECTOR_E2E=1` connector E2E passed 9 of 9 with a neutral dynamically
+  registered client ("Example MCP Client", redirect `https://client.example/...`), linked through Hub's real
+  screens in Chromium, against a real source-built Paseo 0.10.0 daemon (source commit `2c9b09e`) running a
+  real Claude Code coding-agent runtime. The affected suites (`src/paseo-connector`, `src/auth`, the
+  typography policy and the route guard) passed: 16 files, 281 tests.
+- At commit `7fa6ee9`: `db:check`, `typecheck`, `lint`, `format:check` and `build` were clean, and `npm test`
+  passed 186 files and 1,604 tests (29 skipped: the opt-in E2E and real-service suites).

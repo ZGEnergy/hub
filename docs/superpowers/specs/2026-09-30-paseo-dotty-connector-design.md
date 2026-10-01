@@ -12,8 +12,9 @@ Status: Architecture approved in chat; revised 2026-10-01 to a provider-neutral 
 > dev-tools originals of this specification and its plan (commits `1a461e4f` and `a9f201a1`) remain the
 > historical record; this file keeps its original name because the implementation ledger refers to it.
 >
-> Behaviour decided after approval, during implementation review (security semantics were tightened, never
-> loosened):
+> Behaviour decided after approval, during implementation review. Token audience binding is unchanged: every
+> token is bound to the one connector resource. Token-endpoint `resource` matching was relaxed to the RFC 8707
+> default (an absent `resource` means the single connector resource) plus canonical equality:
 >
 > - Only a user who is currently an `owner` or `admin` of the machine's organization can select a machine,
 >   approve a link, or use or refresh a connection.
