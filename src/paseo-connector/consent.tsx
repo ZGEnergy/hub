@@ -443,7 +443,7 @@ function ConsentSummary({ summary }: { summary: ConnectorConsentSummary }) {
         value: (
           <TwoLine
             primary={summary.clientName ?? NO_CLIENT_NAME}
-            secondary={UNVERIFIED_CLIENT_NAME}
+            secondary={summary.clientName === null ? undefined : UNVERIFIED_CLIENT_NAME}
             wrap
           />
         ),
@@ -589,7 +589,10 @@ function ConnectionRow({
   return (
     <DataRow>
       <DataCell>
-        <TwoLine primary={app} secondary={UNVERIFIED_CLIENT_NAME} />
+        <TwoLine
+          primary={app}
+          secondary={record.clientName === null ? undefined : UNVERIFIED_CLIENT_NAME}
+        />
       </DataCell>
       <DataCell>
         <TwoLine primary={machine} secondary={record.workingDirectory} mono />

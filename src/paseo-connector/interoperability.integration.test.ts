@@ -25,6 +25,7 @@ import { Route as ProtectedResourceRoute } from "../routes/[.]well-known/oauth-p
 import { Route as PaseoMcpRoute } from "../routes/mcp/paseo.js";
 import { startApplication, stopApplication } from "../server/runtime.js";
 import { CONNECTOR_FLOW_PARAM } from "./contracts.js";
+import { ConnectorFlowError } from "./flow.js";
 import {
   AgentsContent,
   Browser,
@@ -229,8 +230,12 @@ describe.each(["embedded", "postgres"] as const)(
     }
     type Discovered = Awaited<ReturnType<typeof discover>>;
 
-    /** RFC 7591 dynamic registration of a public client. */
-    async function register(discovered: Discovered, client: { name: string; redirectUri: string }) {
+    /** RFC 7591 dynamic registration of a public client, with `scope` only when given. */
+    async function register(
+      discovered: Discovered,
+      client: { name: string; redirectUri: string },
+      scope?: string,
+    ) {
       const response = await fetch(discovered.registration_endpoint, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -240,6 +245,7 @@ describe.each(["embedded", "postgres"] as const)(
           token_endpoint_auth_method: "none",
           grant_types: ["authorization_code", "refresh_token"],
           response_types: ["code"],
+          ...(scope === undefined ? {} : { scope }),
         }),
       });
       expect(response.status).toBe(201);
@@ -248,11 +254,15 @@ describe.each(["embedded", "postgres"] as const)(
     }
     type RegisteredClient = Awaited<ReturnType<typeof register>>;
 
-    /** The client's authorization request with PKCE S256 and the resource, as the browser sends it. */
+    /**
+     * The client's authorization request with PKCE S256 and the resource, as the browser sends
+     * it. A `scope` of null leaves the parameter out.
+     */
     async function requestAuthorization(
       user: Operator,
       client: RegisteredClient,
       redirectUri: string,
+      scope: string | null = SCOPES,
     ) {
       const verifier = randomBytes(32).toString("base64url");
       const state = randomUUID();
@@ -261,7 +271,7 @@ describe.each(["embedded", "postgres"] as const)(
           response_type: "code",
           client_id: client.clientId,
           redirect_uri: redirectUri,
-          scope: SCOPES,
+          ...(scope === null ? {} : { scope }),
           state,
           code_challenge: createHash("sha256").update(verifier).digest("base64url"),
           code_challenge_method: "S256",
@@ -595,6 +605,86 @@ describe.each(["embedded", "postgres"] as const)(
       );
       expect(refused.location.pathname).not.toBe("/oauth/connect");
       expect(refused.location.searchParams.get("error")).toBe("invalid_redirect");
+    });
+
+    it("defaults an omitted scope to the client's registered scopes, shown at consent", async () => {
+      const user = await operator();
+      const discovered = await discover();
+      // Registered without `scope`, so the library registers all four.
+      const client = await register(discovered, HOSTED_CLIENT);
+      const { location: connect, verifier } = await requestAuthorization(
+        user,
+        client,
+        client.redirectUri,
+        null,
+      );
+      expect(connect.pathname).toBe("/oauth/connect");
+      // The library writes the defaulted scope into the signed query Hub binds to.
+      expect(connect.searchParams.get("scope")?.split(" ").toSorted()).toEqual(
+        SCOPES.split(" ").toSorted(),
+      );
+
+      const connector = auth.connector!;
+      const selected = await connector.selectMachine(
+        {
+          oauthQuery: connect.search,
+          daemonId: user.daemonId,
+          workingDirectory: WORKING_DIRECTORY,
+        },
+        user.browser.headers(),
+      );
+      const consentUrl = new URL(selected.redirectTo, origin);
+      const flowId = consentUrl.searchParams.get(CONNECTOR_FLOW_PARAM) ?? "";
+      consentUrl.searchParams.delete(CONNECTOR_FLOW_PARAM);
+      const consent = { oauthQuery: consentUrl.search, flowId };
+      // The user sees, and approves, exactly the defaulted scopes.
+      const summary = await connector.describeConsent(consent, user.browser.headers());
+      expect([...summary.scopes].toSorted()).toEqual(
+        ["paseo:cancel", "paseo:read", "paseo:run"].toSorted(),
+      );
+      expect(summary.staysConnected).toBe(true);
+      const approved = await connector.decideConsent(
+        { ...consent, accept: true },
+        user.browser.headers(),
+      );
+      const code = new URL(approved.redirectTo).searchParams.get("code");
+      expect(code).not.toBeNull();
+
+      const exchanged = await exchange(client, {
+        code: code!,
+        verifier,
+        redirectUri: client.redirectUri,
+      });
+      expect(exchanged.status).toBe(200);
+      const tokens = Tokens.parse(await exchanged.json());
+      expect(String(jwtClaims(tokens.access_token)["scope"]).split(" ").toSorted()).toEqual(
+        SCOPES.split(" ").toSorted(),
+      );
+    });
+
+    it("refuses at machine selection when the defaulted scope holds no connector scope", async () => {
+      const user = await operator();
+      const discovered = await discover();
+      const client = await register(discovered, HOSTED_CLIENT, "offline_access");
+      const { location: connect } = await requestAuthorization(
+        user,
+        client,
+        client.redirectUri,
+        null,
+      );
+      expect(connect.pathname).toBe("/oauth/connect");
+      expect(connect.searchParams.get("scope")).toBe("offline_access");
+      await expect(
+        auth.connector!.selectMachine(
+          {
+            oauthQuery: connect.search,
+            daemonId: user.daemonId,
+            workingDirectory: WORKING_DIRECTORY,
+          },
+          user.browser.headers(),
+        ),
+      ).rejects.toBeInstanceOf(ConnectorFlowError);
+      expect(await auth.connector!.listConnections(user.browser.headers())).toEqual([]);
     });
   },
 );
