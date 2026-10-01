@@ -2,6 +2,9 @@
 export const CONNECTOR_SCOPES = ["paseo:read", "paseo:run", "paseo:cancel"] as const;
 export type ConnectorScope = (typeof CONNECTOR_SCOPES)[number];
 
+/** The browser carries the flow id beside, never inside, the library's signed query. */
+export const CONNECTOR_FLOW_PARAM = "connector_flow";
+
 /** The four columns that together prove who may touch a connector resource. */
 export interface Identity {
   connectionId: string;

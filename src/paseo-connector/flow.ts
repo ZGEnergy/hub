@@ -7,7 +7,12 @@ import {
   requireConnectableDaemon,
   type ConnectorPrincipal,
 } from "./authorization.js";
-import type { ConnectorScope, ConsentFlow } from "./contracts.js";
+import {
+  CONNECTOR_FLOW_PARAM,
+  ConnectorError,
+  type ConnectorScope,
+  type ConsentFlow,
+} from "./contracts.js";
 import {
   CONNECTOR_CONSENT_PAGE,
   OFFLINE_ACCESS_SCOPE,
@@ -16,8 +21,7 @@ import {
   type ConnectorOAuthEndpoints,
 } from "./oauth.js";
 
-/** The browser carries the flow id beside, never inside, the library's signed query. */
-export const CONNECTOR_FLOW_PARAM = "connector_flow";
+export { CONNECTOR_FLOW_PARAM };
 const FLOW_LIFETIME_MS = 10 * 60_000;
 const MAX_WORKING_DIRECTORY_LENGTH = 4096;
 
@@ -75,6 +79,26 @@ export interface ConnectorConsentInput {
   accept: boolean;
 }
 
+export interface DescribeConnectorConsentInput {
+  /** The query string of the consent page exactly as the authorization server signed it. */
+  oauthQuery: string;
+  flowId: string;
+}
+
+/** What the consent page shows about this session's pending flow. Display data only. */
+export interface ConnectorConsentSummary {
+  /** The name the OAuth client registered for itself, unverified; null when it gave none. */
+  clientName: string | null;
+  /** Where the browser returns after the decision, from the signed `redirect_uri`. */
+  redirectOrigin: string | null;
+  machineName: string;
+  organizationName: string;
+  workingDirectory: string;
+  scopes: readonly ConnectorScope[];
+  /** The client asked for `offline_access`: it may stay connected until revoked. */
+  staysConnected: boolean;
+}
+
 /** Where the browser goes next: the consent page, or the OAuth client's redirect URI. */
 export interface ConnectorRedirect {
   redirectTo: string;
@@ -87,6 +111,8 @@ export interface ConnectorFlowContext {
   listMemberDaemons(userId: string): Promise<readonly ConnectorMachine[]>;
   /** Calls the OAuth library's continue or consent endpoint as this browser; returns its URL. */
   authorize(path: "continue" | "consent", body: Record<string, unknown>): Promise<string>;
+  /** The registered `client_name` of an OAuth client, or null. */
+  oauthClientName(clientId: string): Promise<string | null>;
   now(): Date;
 }
 
@@ -177,17 +203,7 @@ export async function decideConnectorConsent(
   input: ConnectorConsentInput,
 ): Promise<ConnectorRedirect> {
   const { userId, sessionId } = context.account;
-  const oauthQuery = librarySignedQuery(input.oauthQuery);
-  const now = context.now();
-  const flow = await context.database.connector.findFlow(userId, sessionId, input.flowId);
-  if (
-    flow === undefined ||
-    flow.consumedAt !== null ||
-    flow.expiresAt.getTime() <= now.getTime() ||
-    authorizationFingerprint(oauthQuery) !== flow.authorizationFingerprint
-  ) {
-    throw new ConnectorFlowError("flow_not_found", "this authorization is no longer pending");
-  }
+  const { flow, oauthQuery, now } = await pendingFlow(context, input);
   if (!input.accept) {
     const denied = await withConsentFlow(flow, () =>
       context.authorize("consent", { accept: false, oauth_query: oauthQuery }),
@@ -224,6 +240,72 @@ export async function decideConnectorConsent(
     throw new ConnectorFlowError("flow_not_found", "this authorization is no longer pending");
   }
   return { redirectTo };
+}
+
+/**
+ * The consent page's view of the flow this session selected, under the same session, owner,
+ * flow-id, fingerprint and expiry checks as the decision. The client id and redirect URI come from
+ * the signed query, which the fingerprint ties to the selection the library already verified.
+ */
+export async function describeConnectorConsent(
+  context: ConnectorFlowContext,
+  input: DescribeConnectorConsentInput,
+): Promise<ConnectorConsentSummary> {
+  const { userId } = context.account;
+  const { flow, oauthQuery } = await pendingFlow(context, input);
+  const connection = await context.database.connector.findConnection(userId, flow.connectionId);
+  if (
+    connection === undefined ||
+    connection.revokedAt !== null ||
+    connection.activatedAt !== null
+  ) {
+    throw new ConnectorFlowError("flow_not_found", "this authorization is no longer pending");
+  }
+  const machine = (await context.listMemberDaemons(userId)).find(
+    ({ daemonId, organizationId }) =>
+      daemonId === connection.daemonId && organizationId === connection.organizationId,
+  );
+  if (machine === undefined) throw new ConnectorError("not_found");
+  const params = new URLSearchParams(oauthQuery);
+  const clientId = params.get("client_id");
+  return {
+    clientName: clientId === null ? null : await context.oauthClientName(clientId),
+    redirectOrigin: urlOrigin(params.get("redirect_uri")),
+    machineName: machine.name,
+    organizationName: machine.organizationName,
+    workingDirectory: connection.workingDirectory,
+    scopes: connection.scopes,
+    staysConnected: (params.get("scope") ?? "").split(" ").includes(OFFLINE_ACCESS_SCOPE),
+  };
+}
+
+/** This session's unconsumed, unexpired flow whose fingerprint matches the signed query. */
+async function pendingFlow(
+  context: ConnectorFlowContext,
+  input: { oauthQuery: string; flowId: string },
+): Promise<{ flow: ConsentFlow; oauthQuery: string; now: Date }> {
+  const { userId, sessionId } = context.account;
+  const oauthQuery = librarySignedQuery(input.oauthQuery);
+  const now = context.now();
+  const flow = await context.database.connector.findFlow(userId, sessionId, input.flowId);
+  if (
+    flow === undefined ||
+    flow.consumedAt !== null ||
+    flow.expiresAt.getTime() <= now.getTime() ||
+    authorizationFingerprint(oauthQuery) !== flow.authorizationFingerprint
+  ) {
+    throw new ConnectorFlowError("flow_not_found", "this authorization is no longer pending");
+  }
+  return { flow, oauthQuery, now };
+}
+
+function urlOrigin(value: string | null): string | null {
+  if (value === null) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
 }
 
 export async function listConnectorConnections(
@@ -299,6 +381,19 @@ export async function listMemberDaemons(
   }));
 }
 
+/** The `client_name` an OAuth client registered for itself, if any. */
+export async function oauthClientName(
+  runtime: DatabaseRuntime,
+  clientId: string,
+): Promise<string | null> {
+  const result = await runtime.query<{ name: string | null }>(
+    "select name from oauth_client where client_id = $1",
+    [clientId],
+  );
+  const name = result.rows[0]?.name?.trim();
+  return name === undefined || name === "" ? null : name;
+}
+
 /** The signed query as the library issued it, minus Hub's own flow parameter. */
 function librarySignedQuery(query: string): string {
   const params = new URLSearchParams(query.startsWith("?") ? query.slice(1) : query);
@@ -343,6 +438,10 @@ export interface ConnectorOAuthService {
   listMachines(headers: Headers): Promise<readonly ConnectorMachine[]>;
   selectMachine(input: SelectConnectorMachineInput, headers: Headers): Promise<ConnectorRedirect>;
   decideConsent(input: ConnectorConsentInput, headers: Headers): Promise<ConnectorRedirect>;
+  describeConsent(
+    input: DescribeConnectorConsentInput,
+    headers: Headers,
+  ): Promise<ConnectorConsentSummary>;
   listConnections(headers: Headers): Promise<readonly ConnectorConnectionSummary[]>;
   revokeConnection(
     input: { connectionId: string },

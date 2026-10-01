@@ -8,6 +8,7 @@ import { ConnectorError } from "./contracts.js";
 import {
   ConnectorFlowError,
   type ConnectorConnectionSummary,
+  type ConnectorConsentSummary,
   type ConnectorMachine,
   type ConnectorOAuthService,
   type ConnectorRedirect,
@@ -22,6 +23,10 @@ const consentSchema = z.object({
   oauthQuery: z.string().min(1),
   flowId: z.string().uuid(),
   accept: z.boolean(),
+});
+const describeConsentSchema = z.object({
+  oauthQuery: z.string().min(1),
+  flowId: z.string().uuid(),
 });
 const connectionIdSchema = z.object({ connectionId: z.string().uuid() });
 
@@ -65,6 +70,17 @@ export const decidePaseoConnectorConsent = createServerFn({ method: "POST" })
       return respondOk(await connector.decideConsent(data, getRequest().headers));
     } catch (error) {
       return connectorFailure(error, "paseo_connector.decide_consent");
+    }
+  });
+
+export const describePaseoConnectorConsent = createServerFn({ method: "GET" })
+  .validator(describeConsentSchema)
+  .handler(async ({ data }): Promise<Result<ConnectorConsentSummary>> => {
+    try {
+      const connector = await enabledConnector();
+      return respondOk(await connector.describeConsent(data, getRequest().headers));
+    } catch (error) {
+      return connectorFailure(error, "paseo_connector.describe_consent");
     }
   });
 

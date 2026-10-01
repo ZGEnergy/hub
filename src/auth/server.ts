@@ -50,9 +50,11 @@ import {
 import {
   ConnectorFlowError,
   decideConnectorConsent,
+  describeConnectorConsent,
   listConnectorConnections,
   listConnectorMachines,
   listMemberDaemons,
+  oauthClientName,
   revokeConnectorConnection,
   selectConnectorMachine,
   type ConnectorFlowContext,
@@ -445,6 +447,7 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
         account: { userId: session.userId, sessionId: session.sessionId },
         listMemberDaemons: (userId) => listMemberDaemons(options.database, userId),
         authorize: (path, body) => authorizeAsBrowser(path, body, headers),
+        oauthClientName: (clientId) => oauthClientName(options.database, clientId),
         now: () => new Date(),
       };
     };
@@ -463,6 +466,8 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
         selectConnectorMachine(await mutation(headers), input),
       decideConsent: async (input, headers) =>
         decideConnectorConsent(await mutation(headers), input),
+      describeConsent: async (input, headers) =>
+        describeConnectorConsent(await flow(headers), input),
       listConnections: async (headers) => listConnectorConnections(await flow(headers)),
       revokeConnection: async (input, headers) =>
         revokeConnectorConnection(await mutation(headers), input),

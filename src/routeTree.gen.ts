@@ -35,6 +35,9 @@ import { Route as ApiBillingPlansRouteImport } from './routes/api/billing/plans'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
 import { Route as AgentSessionsSessionIdMcpRouteImport } from './routes/agent-sessions/$sessionId/mcp'
 import { Route as AgentExecutionsExecutionIdMcpRouteImport } from './routes/agent-executions/$executionId/mcp'
+import { Route as ShellOauthConsentRouteImport } from './routes/_shell/oauth/consent'
+import { Route as ShellOauthConnectionsRouteImport } from './routes/_shell/oauth/connections'
+import { Route as ShellOauthConnectRouteImport } from './routes/_shell/oauth/connect'
 import { Route as ApiV1CliAuthorizationsPollRouteImport } from './routes/api/v1/cli-authorizations/poll'
 import { Route as ApiIntegrationsSlackEventsRouteImport } from './routes/api/integrations/slack/events'
 import { Route as ApiIntegrationsSlackCallbackRouteImport } from './routes/api/integrations/slack/callback'
@@ -191,6 +194,21 @@ const AgentExecutionsExecutionIdMcpRoute =
     path: '/agent-executions/$executionId/mcp',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ShellOauthConsentRoute = ShellOauthConsentRouteImport.update({
+  id: '/oauth/consent',
+  path: '/oauth/consent',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellOauthConnectionsRoute = ShellOauthConnectionsRouteImport.update({
+  id: '/oauth/connections',
+  path: '/oauth/connections',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellOauthConnectRoute = ShellOauthConnectRouteImport.update({
+  id: '/oauth/connect',
+  path: '/oauth/connect',
+  getParentRoute: () => ShellRoute,
+} as any)
 const ApiV1CliAuthorizationsPollRoute =
   ApiV1CliAuthorizationsPollRouteImport.update({
     id: '/poll',
@@ -347,6 +365,9 @@ export interface FileRoutesByFullPath {
   '/test/smoke': typeof TestSmokeRoute
   '/test/stripe-checkout': typeof TestStripeCheckoutRoute
   '/test/trigger': typeof TestTriggerRoute
+  '/oauth/connect': typeof ShellOauthConnectRoute
+  '/oauth/connections': typeof ShellOauthConnectionsRoute
+  '/oauth/consent': typeof ShellOauthConsentRoute
   '/agent-executions/$executionId/mcp': typeof AgentExecutionsExecutionIdMcpRoute
   '/agent-sessions/$sessionId/mcp': typeof AgentSessionsSessionIdMcpRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -397,6 +418,9 @@ export interface FileRoutesByTo {
   '/test/stripe-checkout': typeof TestStripeCheckoutRoute
   '/test/trigger': typeof TestTriggerRoute
   '/': typeof ShellIndexRoute
+  '/oauth/connect': typeof ShellOauthConnectRoute
+  '/oauth/connections': typeof ShellOauthConnectionsRoute
+  '/oauth/consent': typeof ShellOauthConsentRoute
   '/agent-executions/$executionId/mcp': typeof AgentExecutionsExecutionIdMcpRoute
   '/agent-sessions/$sessionId/mcp': typeof AgentSessionsSessionIdMcpRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -447,6 +471,9 @@ export interface FileRoutesById {
   '/test/stripe-checkout': typeof TestStripeCheckoutRoute
   '/test/trigger': typeof TestTriggerRoute
   '/_shell/': typeof ShellIndexRoute
+  '/_shell/oauth/connect': typeof ShellOauthConnectRoute
+  '/_shell/oauth/connections': typeof ShellOauthConnectionsRoute
+  '/_shell/oauth/consent': typeof ShellOauthConsentRoute
   '/agent-executions/$executionId/mcp': typeof AgentExecutionsExecutionIdMcpRoute
   '/agent-sessions/$sessionId/mcp': typeof AgentSessionsSessionIdMcpRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
@@ -499,6 +526,9 @@ export interface FileRouteTypes {
     | '/test/smoke'
     | '/test/stripe-checkout'
     | '/test/trigger'
+    | '/oauth/connect'
+    | '/oauth/connections'
+    | '/oauth/consent'
     | '/agent-executions/$executionId/mcp'
     | '/agent-sessions/$sessionId/mcp'
     | '/api/auth/$'
@@ -549,6 +579,9 @@ export interface FileRouteTypes {
     | '/test/stripe-checkout'
     | '/test/trigger'
     | '/'
+    | '/oauth/connect'
+    | '/oauth/connections'
+    | '/oauth/consent'
     | '/agent-executions/$executionId/mcp'
     | '/agent-sessions/$sessionId/mcp'
     | '/api/auth/$'
@@ -598,6 +631,9 @@ export interface FileRouteTypes {
     | '/test/stripe-checkout'
     | '/test/trigger'
     | '/_shell/'
+    | '/_shell/oauth/connect'
+    | '/_shell/oauth/connections'
+    | '/_shell/oauth/consent'
     | '/agent-executions/$executionId/mcp'
     | '/agent-sessions/$sessionId/mcp'
     | '/api/auth/$'
@@ -848,6 +884,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AgentExecutionsExecutionIdMcpRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_shell/oauth/consent': {
+      id: '/_shell/oauth/consent'
+      path: '/oauth/consent'
+      fullPath: '/oauth/consent'
+      preLoaderRoute: typeof ShellOauthConsentRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/oauth/connections': {
+      id: '/_shell/oauth/connections'
+      path: '/oauth/connections'
+      fullPath: '/oauth/connections'
+      preLoaderRoute: typeof ShellOauthConnectionsRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/oauth/connect': {
+      id: '/_shell/oauth/connect'
+      path: '/oauth/connect'
+      fullPath: '/oauth/connect'
+      preLoaderRoute: typeof ShellOauthConnectRouteImport
+      parentRoute: typeof ShellRoute
+    }
     '/api/v1/cli-authorizations/poll': {
       id: '/api/v1/cli-authorizations/poll'
       path: '/poll'
@@ -1064,6 +1121,9 @@ interface ShellRouteChildren {
   ShellOperatorRoute: typeof ShellOperatorRoute
   ShellTriggersRoute: typeof ShellTriggersRoute
   ShellIndexRoute: typeof ShellIndexRoute
+  ShellOauthConnectRoute: typeof ShellOauthConnectRoute
+  ShellOauthConnectionsRoute: typeof ShellOauthConnectionsRoute
+  ShellOauthConsentRoute: typeof ShellOauthConsentRoute
   ShellOOrganizationSlugActivityRoute: typeof ShellOOrganizationSlugActivityRoute
   ShellOOrganizationSlugConnectionsRoute: typeof ShellOOrganizationSlugConnectionsRoute
   ShellOOrganizationSlugDaemonsRoute: typeof ShellOOrganizationSlugDaemonsRoute
@@ -1079,6 +1139,9 @@ const ShellRouteChildren: ShellRouteChildren = {
   ShellOperatorRoute: ShellOperatorRoute,
   ShellTriggersRoute: ShellTriggersRoute,
   ShellIndexRoute: ShellIndexRoute,
+  ShellOauthConnectRoute: ShellOauthConnectRoute,
+  ShellOauthConnectionsRoute: ShellOauthConnectionsRoute,
+  ShellOauthConsentRoute: ShellOauthConsentRoute,
   ShellOOrganizationSlugActivityRoute: ShellOOrganizationSlugActivityRoute,
   ShellOOrganizationSlugConnectionsRoute:
     ShellOOrganizationSlugConnectionsRoute,

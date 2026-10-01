@@ -639,6 +639,60 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
     expect(await connector.listConnections(browser.headers())).toHaveLength(1);
   });
 
+  it("describes a pending flow only to the session that selected it", async () => {
+    const { browser, machine } = await operator();
+    const clientId = await registerClient();
+    const sameUserOtherSession = new Browser(auth, browser.email);
+    await sameUserOtherSession.signIn();
+    const stranger = await operator();
+    const consent = await select(
+      browser,
+      (await authorization(browser, clientId)).connectQuery,
+      machine,
+    );
+    const foreign = await select(
+      stranger.browser,
+      (await authorization(stranger.browser, clientId)).connectQuery,
+      stranger.machine,
+    );
+
+    expect(await connector.describeConsent(consent, browser.headers())).toEqual({
+      clientName: "Dotty",
+      redirectOrigin: new URL(REDIRECT_URI).origin,
+      machineName: `devbox-${machine.slice(0, 8)}`,
+      organizationName: "Acme",
+      workingDirectory: "/srv/work/project",
+      scopes: ["paseo:read", "paseo:run"],
+      staysConnected: true,
+    });
+    const notFound = { code: "flow_not_found" };
+    // Another user's flow id, even carried with this user's own signed query.
+    await expect(
+      connector.describeConsent({ ...consent, flowId: foreign.flowId }, browser.headers()),
+    ).rejects.toMatchObject(notFound);
+    await expect(
+      connector.describeConsent({ ...consent, flowId: randomUUID() }, browser.headers()),
+    ).rejects.toMatchObject(notFound);
+    for (const other of [sameUserOtherSession, stranger.browser]) {
+      await expect(connector.describeConsent(consent, other.headers())).rejects.toMatchObject(
+        notFound,
+      );
+    }
+    const widened = new URLSearchParams(consent.oauthQuery);
+    widened.set("scope", "paseo:read paseo:run paseo:cancel offline_access");
+    await expect(
+      connector.describeConsent(
+        { oauthQuery: widened.toString(), flowId: consent.flowId },
+        browser.headers(),
+      ),
+    ).rejects.toMatchObject(notFound);
+
+    await connector.decideConsent({ ...consent, accept: true }, browser.headers());
+    await expect(connector.describeConsent(consent, browser.headers())).rejects.toMatchObject(
+      notFound,
+    );
+  });
+
   it("makes a denial final: no code, no connection, no later approval", async () => {
     const { browser, machine } = await operator();
     const clientId = await registerClient();
