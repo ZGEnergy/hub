@@ -16,6 +16,7 @@ import { Route as ShellIndexRouteImport } from './routes/_shell/index'
 import { Route as TestTriggerRouteImport } from './routes/test/trigger'
 import { Route as TestStripeCheckoutRouteImport } from './routes/test/stripe-checkout'
 import { Route as TestSmokeRouteImport } from './routes/test/smoke'
+import { Route as McpPaseoRouteImport } from './routes/mcp/paseo'
 import { Route as AssetsSplatRouteImport } from './routes/assets/$'
 import { Route as ApiReferenceRouteImport } from './routes/api/reference'
 import { Route as ApiOpenapiDotjsonRouteImport } from './routes/api/openapi[.]json'
@@ -94,6 +95,11 @@ const TestStripeCheckoutRoute = TestStripeCheckoutRouteImport.update({
 const TestSmokeRoute = TestSmokeRouteImport.update({
   id: '/test/smoke',
   path: '/test/smoke',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const McpPaseoRoute = McpPaseoRouteImport.update({
+  id: '/mcp/paseo',
+  path: '/mcp/paseo',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AssetsSplatRoute = AssetsSplatRouteImport.update({
@@ -362,6 +368,7 @@ export interface FileRoutesByFullPath {
   '/api/openapi.json': typeof ApiOpenapiDotjsonRoute
   '/api/reference': typeof ApiReferenceRoute
   '/assets/$': typeof AssetsSplatRoute
+  '/mcp/paseo': typeof McpPaseoRoute
   '/test/smoke': typeof TestSmokeRoute
   '/test/stripe-checkout': typeof TestStripeCheckoutRoute
   '/test/trigger': typeof TestTriggerRoute
@@ -414,6 +421,7 @@ export interface FileRoutesByTo {
   '/api/openapi.json': typeof ApiOpenapiDotjsonRoute
   '/api/reference': typeof ApiReferenceRoute
   '/assets/$': typeof AssetsSplatRoute
+  '/mcp/paseo': typeof McpPaseoRoute
   '/test/smoke': typeof TestSmokeRoute
   '/test/stripe-checkout': typeof TestStripeCheckoutRoute
   '/test/trigger': typeof TestTriggerRoute
@@ -467,6 +475,7 @@ export interface FileRoutesById {
   '/api/openapi.json': typeof ApiOpenapiDotjsonRoute
   '/api/reference': typeof ApiReferenceRoute
   '/assets/$': typeof AssetsSplatRoute
+  '/mcp/paseo': typeof McpPaseoRoute
   '/test/smoke': typeof TestSmokeRoute
   '/test/stripe-checkout': typeof TestStripeCheckoutRoute
   '/test/trigger': typeof TestTriggerRoute
@@ -523,6 +532,7 @@ export interface FileRouteTypes {
     | '/api/openapi.json'
     | '/api/reference'
     | '/assets/$'
+    | '/mcp/paseo'
     | '/test/smoke'
     | '/test/stripe-checkout'
     | '/test/trigger'
@@ -575,6 +585,7 @@ export interface FileRouteTypes {
     | '/api/openapi.json'
     | '/api/reference'
     | '/assets/$'
+    | '/mcp/paseo'
     | '/test/smoke'
     | '/test/stripe-checkout'
     | '/test/trigger'
@@ -627,6 +638,7 @@ export interface FileRouteTypes {
     | '/api/openapi.json'
     | '/api/reference'
     | '/assets/$'
+    | '/mcp/paseo'
     | '/test/smoke'
     | '/test/stripe-checkout'
     | '/test/trigger'
@@ -677,6 +689,7 @@ export interface RootRouteChildren {
   ApiOpenapiDotjsonRoute: typeof ApiOpenapiDotjsonRoute
   ApiReferenceRoute: typeof ApiReferenceRoute
   AssetsSplatRoute: typeof AssetsSplatRoute
+  McpPaseoRoute: typeof McpPaseoRoute
   TestSmokeRoute: typeof TestSmokeRoute
   TestStripeCheckoutRoute: typeof TestStripeCheckoutRoute
   TestTriggerRoute: typeof TestTriggerRoute
@@ -749,6 +762,13 @@ declare module '@tanstack/react-router' {
       path: '/test/smoke'
       fullPath: '/test/smoke'
       preLoaderRoute: typeof TestSmokeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/mcp/paseo': {
+      id: '/mcp/paseo'
+      path: '/mcp/paseo'
+      fullPath: '/mcp/paseo'
+      preLoaderRoute: typeof McpPaseoRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/assets/$': {
@@ -1179,6 +1199,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiOpenapiDotjsonRoute: ApiOpenapiDotjsonRoute,
   ApiReferenceRoute: ApiReferenceRoute,
   AssetsSplatRoute: AssetsSplatRoute,
+  McpPaseoRoute: McpPaseoRoute,
   TestSmokeRoute: TestSmokeRoute,
   TestStripeCheckoutRoute: TestStripeCheckoutRoute,
   TestTriggerRoute: TestTriggerRoute,
