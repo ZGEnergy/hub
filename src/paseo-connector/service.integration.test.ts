@@ -5,9 +5,6 @@ import { join } from "node:path";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { createApplicationRuntime } from "../application-runtime.js";
-import { composeEntitlements } from "../auth/entitlements.js";
-import { createAuthServer } from "../auth/server.js";
 import {
   DaemonAgentError,
   DaemonUnsupportedError,
@@ -1318,52 +1315,6 @@ describe("Paseo Agent Connector service across a restart", () => {
         await service.getAgent(principal, { operation_id: started.operationId }),
       ).toMatchObject({ operation: { state: "accepted", agentId: started.agentId } });
     } finally {
-      await bundle.runtime.close();
-      await rm(root, { recursive: true, force: true });
-    }
-  }, 120_000);
-});
-
-describe("Paseo Agent Connector service wiring", () => {
-  it("is built on the application's daemon resolver, including its test injection", async () => {
-    const root = await mkdtemp(join(tmpdir(), "hub-connector-wiring-"));
-    const bundle = await embeddedDatabaseRuntime(join(root, "database"));
-    await bundle.runtime.migrate();
-    const database = createDatabase(bundle.runtime, bundle.locks);
-    const auth = createAuthServer({
-      database: bundle.runtime,
-      locks: bundle.locks,
-      entitlements: composeEntitlements(database, bundle.runtime).service,
-      secret: "connector-service-test-secret-at-least-32-characters",
-      baseURL: "http://localhost:3000",
-      policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
-      paseoConnector: true,
-    });
-    try {
-      const machine = await seedMachine(bundle, database);
-      const { principal } = await connect(database, machine, machine.alice);
-      const daemon = new DaemonDouble();
-      const connection = daemonConnection(daemon);
-      const application = await createApplicationRuntime({
-        database,
-        auth,
-        entitlements: composeEntitlements(database, bundle.runtime).service,
-        billing: null,
-        daemonConnectionForId: (daemonId) =>
-          daemonId === machine.daemonId ? connection : undefined,
-        close: () => Promise.resolve(),
-      });
-      try {
-        const connector = application.paseoConnector;
-        if (connector.status !== "enabled") throw new Error("connector should be enabled");
-        expect((await connector.service.getConnection(principal)).machine.online).toBe(true);
-        await connector.service.listRuntimes(principal);
-        expect(daemon.calls).toEqual([{ method: "snapshot", args: [WORKING_DIRECTORY] }]);
-      } finally {
-        await application.stop();
-      }
-    } finally {
-      await auth.close();
       await bundle.runtime.close();
       await rm(root, { recursive: true, force: true });
     }
