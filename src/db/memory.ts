@@ -4,6 +4,7 @@ import { parseCompiledHubConfig, type JsonValue } from "../config/compiler.js";
 import type { LaunchMachineIntent } from "../dispatcher/launch-machine-intent.js";
 import { linearConnectionRequiresReauthorization } from "../providers/linear/client.js";
 import { launchedAgent } from "./mappers.js";
+import { MemoryConnectorStore } from "../paseo-connector/internal/memory-store.js";
 import type {
   AgentExecutionRecord,
   AgentExecutionOutputAttempt,
@@ -157,6 +158,8 @@ export function createMemoryDatabase(options: MemoryDatabaseOptions = {}): Datab
 }
 
 class MemoryDatabase implements Database {
+  readonly connector: import("../paseo-connector/contracts.js").ConnectorStore =
+    new MemoryConnectorStore();
   // This test double has no background work. Scheduling tests use the actual embedded/PG runtime.
   get schedules(): import("../triggers/schedule/index.js").ScheduleStore {
     return (

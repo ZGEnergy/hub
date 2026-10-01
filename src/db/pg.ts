@@ -1,4 +1,5 @@
 import { ExecutionAuthorityRepository } from "../execution-authority/index.js";
+import { ConnectorRepository } from "../paseo-connector/internal/repository.js";
 import { ScheduleRepository } from "../triggers/schedule/index.js";
 import { acceptWorkflowRun } from "./workflow-intake.js";
 import { randomUUID } from "node:crypto";
@@ -139,6 +140,7 @@ export function createDatabase(runtime: DatabaseRuntime, locks: Locks): Database
 class PgDatabase implements Database {
   readonly schedules;
   readonly executionAuthority;
+  readonly connector;
   private readonly connections;
   private readonly triggerAcceptance;
 
@@ -148,6 +150,7 @@ class PgDatabase implements Database {
   ) {
     this.schedules = new ScheduleRepository(this.pool);
     this.executionAuthority = new ExecutionAuthorityRepository(this.pool);
+    this.connector = new ConnectorRepository(this.pool);
     const database = this.pool.drizzle();
     this.connections = new ConnectionRepository(this.pool, locks);
     this.triggerAcceptance = new ProviderEventAcceptanceRepository(database, this.connections);

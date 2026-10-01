@@ -1180,6 +1180,7 @@ export interface TerminateMachineFields {
 }
 
 export interface Database {
+  readonly connector: import("../paseo-connector/contracts.js").ConnectorStore;
   readonly executionAuthority: import("../execution-authority/index.js").ExecutionAuthorityStore;
   readonly schedules: import("../triggers/schedule/index.js").ScheduleStore;
   findAgentSessionByKey(
