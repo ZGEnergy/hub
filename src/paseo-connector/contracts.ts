@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 /** Shared connector contracts. Existing user/org ids are text; daemon and connector ids are UUIDs. */
 export const CONNECTOR_SCOPES = ["paseo:read", "paseo:run", "paseo:cancel"] as const;
 export type ConnectorScope = (typeof CONNECTOR_SCOPES)[number];
@@ -72,15 +74,68 @@ export type ConnectorErrorCode =
   | "outcome_unknown"
   | "invalid_cursor";
 
+/**
+ * The caller's own operation identity carried by an unresolved or partial disposition, so it can
+ * inspect that operation instead of retrying with a new key. Never another identity's data.
+ */
+export interface ConnectorErrorDetails {
+  operationId?: string;
+  agentId?: string;
+  state?: OperationState;
+}
+
 export class ConnectorError extends Error {
   constructor(
     readonly code: ConnectorErrorCode,
     message: string = code,
+    readonly details?: ConnectorErrorDetails,
   ) {
     super(message);
     this.name = "ConnectorError";
   }
 }
+
+/** Service inputs, shared with the MCP layer. Parsing applies the defaults the service relies on. */
+export const ConnectorCursorInput = z.object({
+  epoch: z.string(),
+  seq: z.number().int().nonnegative(),
+});
+
+export const StartAgentInput = z.object({
+  request_key: z.uuid(),
+  task: z.string().min(1),
+  title: z.string().min(1),
+  provider: z.string().min(1),
+  model: z.string().min(1).optional(),
+  mode: z.string().min(1).optional(),
+});
+export type StartAgentInput = z.input<typeof StartAgentInput>;
+
+/** Timeline pages hold 1..100 entries; the daemon reads 0 as "everything", so it is never sent. */
+export const AGENT_TIMELINE_DEFAULT_LIMIT = 20;
+export const AGENT_TIMELINE_MAX_LIMIT = 100;
+
+/** `direction` defaults to "tail", or to "after" when a cursor is given. */
+export const GetAgentInput = z.union([
+  z.object({
+    agent_id: z.string().min(1),
+    cursor: ConnectorCursorInput.optional(),
+    direction: z.enum(["tail", "before", "after"]).optional(),
+    limit: z.number().int().min(1).max(AGENT_TIMELINE_MAX_LIMIT).optional(),
+  }),
+  z.object({ operation_id: z.uuid() }),
+]);
+export type GetAgentInput = z.input<typeof GetAgentInput>;
+
+export const SendAgentMessageInput = z.object({
+  request_key: z.uuid(),
+  agent_id: z.string().min(1),
+  text: z.string().min(1),
+});
+export type SendAgentMessageInput = z.input<typeof SendAgentMessageInput>;
+
+export const CancelAgentInput = z.object({ agent_id: z.string().min(1) });
+export type CancelAgentInput = z.input<typeof CancelAgentInput>;
 
 export interface ConnectorStore {
   /** Stores the connection unactivated (activatedAt and revokedAt are always null on creation). */

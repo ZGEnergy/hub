@@ -18,6 +18,7 @@ export interface AuthorizedConnection extends Identity {
   workingDirectory: string;
   /** Connector scopes both carried by the token and granted to the connection. */
   scopes: readonly ConnectorScope[];
+  createdAt: Date;
   daemon: DaemonRecord;
 }
 
@@ -51,6 +52,7 @@ export async function authorizeConnectorRequest(
     daemonId: connection.daemonId,
     workingDirectory: connection.workingDirectory,
     scopes: tokenScopes,
+    createdAt: connection.createdAt,
     daemon,
   };
 }

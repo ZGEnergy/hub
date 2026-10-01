@@ -120,8 +120,15 @@ export class MemoryConnectorStore implements ConnectorStore {
       return structuredClone(existing);
     }
     if (this.operations.has(input.id)) throw new Error("operation already exists");
-    this.operations.set(input.id, structuredClone(input));
-    return structuredClone(input);
+    const stored: ConnectorOperation = {
+      ...input,
+      agentId: input.kind === "message" ? input.agentId : null,
+      workspaceId: null,
+      state: "creating",
+      errorCode: null,
+    };
+    this.operations.set(stored.id, structuredClone(stored));
+    return structuredClone(stored);
   }
 
   async findOperation(identity: Identity, id: string) {
@@ -169,10 +176,17 @@ export class MemoryConnectorStore implements ConnectorStore {
     state: OperationState,
     errorCode: string | null,
   ) {
-    if (state === "created") throw new ConnectorError("request_conflict");
     const operation = this.operations.get(operationId);
     if (operation === undefined || !sameIdentity(operation, identity))
       throw new ConnectorError("not_found");
+    const owned = this.agents.some(
+      (agent) => sameIdentity(agent, identity) && agent.launchOperationId === operationId,
+    );
+    if (
+      (operation.state === "accepted" && state !== "accepted") ||
+      (owned ? state === "creating" || state === "failed" : state === "created")
+    )
+      throw new ConnectorError("request_conflict");
     Object.assign(operation, { state, errorCode });
   }
 

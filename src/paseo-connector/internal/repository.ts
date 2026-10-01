@@ -242,10 +242,12 @@ export class ConnectorRepository implements ConnectorStore {
           input.requestFingerprint,
           input.creationKey,
           input.messageId,
-          input.agentId,
-          input.workspaceId,
-          input.state,
-          input.errorCode,
+          // A new operation always starts unresolved. Only a message names its (owned) agent up
+          // front; a launch learns its agent and workspace through bindCreatedAgent.
+          input.kind === "message" ? input.agentId : null,
+          null,
+          "creating",
+          null,
         ],
       );
     } catch (error) {
@@ -289,14 +291,25 @@ export class ConnectorRepository implements ConnectorStore {
     state: OperationState,
     errorCode: string | null,
   ) {
-    // "created" is reachable only through bindCreatedAgent, which also records ownership.
-    if (state === "created") throw new ConnectorError("request_conflict");
+    // An accepted operation is final. A launch whose owned-agent row exists keeps an agent: it may
+    // be marked accepted, created (e.g. prompt rejected) or outcome_unknown, never creating/failed.
+    // Without that row, "created" is reachable only through bindCreatedAgent.
     const result = await this.runtime.query(
-      `update connector_operations o set state = $6, error_code = $7
-       where ${identityMatch("o", 1)} and o.id = $5`,
+      `update connector_operations o set state = $6::text, error_code = $7
+       where ${identityMatch("o", 1)} and o.id = $5
+         and (o.state <> 'accepted' or $6::text = 'accepted')
+         and case
+           when exists (
+             select 1 from connector_agents a
+             where ${identityMatch("a", 1)} and a.launch_operation_id = o.id
+           ) then $6::text not in ('creating', 'failed')
+           else $6::text <> 'created'
+         end`,
       [...identityParams(identity), operationId, state, errorCode],
     );
-    if (result.rowCount === 0) throw new ConnectorError("not_found");
+    if (result.rowCount > 0) return;
+    const present = await this.findOperation(identity, operationId);
+    throw new ConnectorError(present === undefined ? "not_found" : "request_conflict");
   }
 
   async findOwnedAgent(identity: Identity, agentId: string) {

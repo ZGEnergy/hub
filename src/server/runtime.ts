@@ -20,6 +20,7 @@ import type { DaemonProviderCatalog } from "../daemons/provider-catalog.js";
 import type { HomeDashboard } from "../home/dashboard.js";
 import type { Database } from "../db/types.js";
 import type { ConnectorOAuthService } from "../paseo-connector/flow.js";
+import type { ConnectorService } from "../paseo-connector/service.js";
 
 /**
  * The public plan catalog shape is billing's own: `src/billing/public-catalog.ts` decides which
@@ -64,11 +65,17 @@ export class BillingForbiddenError extends Error {
 }
 
 /** The Paseo connector: 503 without a database, 404 when the public origin is neither HTTPS nor
- * loopback, otherwise its OAuth surface plus the database its authorization reads. */
+ * loopback, otherwise its OAuth surface, the database its authorization reads, and the owned-agent
+ * service that reaches daemons through the app's own connection resolver. */
 export type PaseoConnectorAccess =
   | { status: "database_unavailable" }
   | { status: "disabled" }
-  | { status: "enabled"; oauth: ConnectorOAuthService; database: Database };
+  | {
+      status: "enabled";
+      oauth: ConnectorOAuthService;
+      database: Database;
+      service: ConnectorService;
+    };
 
 export interface ApplicationRuntime {
   hub: HubRuntime;

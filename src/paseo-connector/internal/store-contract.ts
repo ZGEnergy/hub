@@ -397,7 +397,7 @@ export function describeConnectorStoreContract(open: () => Promise<ConnectorStor
     }
   });
 
-  it("changes operation state only for the owning identity and never to created", async () => {
+  it("changes operation state only for the owning identity and never to created unbound", async () => {
     const fixture = fixtureOf();
     const alice = await activated(fixture, fixture.aliceUserId);
     const operation = await fixture.store.beginOperation(operationFor(alice));
@@ -421,6 +421,85 @@ export function describeConnectorStoreContract(open: () => Promise<ConnectorStor
     );
     expect(await fixture.store.findOperation(alice, operation.id)).toMatchObject({
       state: "outcome_unknown",
+    });
+  });
+
+  it("starts every new operation unresolved whatever the input claims", async () => {
+    const fixture = fixtureOf();
+    const alice = await activated(fixture, fixture.aliceUserId);
+    const claims = {
+      agentId: "agent-claimed",
+      workspaceId: "workspace-claimed",
+      state: "accepted",
+      errorCode: "claimed",
+    } as const;
+    const launch = await fixture.store.beginOperation(operationFor(alice, claims));
+    expect(launch).toMatchObject({
+      state: "creating",
+      agentId: null,
+      workspaceId: null,
+      errorCode: null,
+    });
+    const message = await fixture.store.beginOperation(
+      operationFor(alice, { ...claims, kind: "message", creationKey: null }),
+    );
+    expect(message).toMatchObject({
+      state: "creating",
+      agentId: "agent-claimed",
+      workspaceId: null,
+      errorCode: null,
+    });
+    expect(await fixture.store.findOperation(alice, launch.id)).toEqual(launch);
+    expect(await fixture.store.findOperation(alice, message.id)).toEqual(message);
+    expect(await fixture.store.listOwnedAgents(alice)).toEqual([]);
+  });
+
+  it("never moves an operation out of accepted", async () => {
+    const fixture = fixtureOf();
+    const alice = await activated(fixture, fixture.aliceUserId);
+    const message = await fixture.store.beginOperation(
+      operationFor(alice, { kind: "message", agentId: "agent-m", creationKey: null }),
+    );
+    await fixture.store.setOperationState(alice, message.id, "accepted", null);
+    for (const state of ["creating", "failed", "outcome_unknown", "created"] as const) {
+      await rejectsWith(
+        fixture.store.setOperationState(alice, message.id, state, "late"),
+        "request_conflict",
+      );
+    }
+    expect(await fixture.store.findOperation(alice, message.id)).toMatchObject({
+      state: "accepted",
+      errorCode: null,
+    });
+  });
+
+  it("keeps a launch with an owned agent from regressing to creating or failed", async () => {
+    const fixture = fixtureOf();
+    const alice = await activated(fixture, fixture.aliceUserId);
+    const launch = await fixture.store.beginOperation(operationFor(alice));
+    await fixture.store.bindCreatedAgent(alice, launch.id, "agent-a", "workspace-a", T0);
+    for (const state of ["creating", "failed"] as const) {
+      await rejectsWith(
+        fixture.store.setOperationState(alice, launch.id, state, "create_rejected"),
+        "request_conflict",
+      );
+    }
+    await fixture.store.setOperationState(alice, launch.id, "created", "prompt_rejected");
+    expect(await fixture.store.findOperation(alice, launch.id)).toMatchObject({
+      state: "created",
+      errorCode: "prompt_rejected",
+      agentId: "agent-a",
+    });
+    await fixture.store.setOperationState(alice, launch.id, "outcome_unknown", "lost");
+    await fixture.store.setOperationState(alice, launch.id, "accepted", null);
+    expect(await fixture.store.findOperation(alice, launch.id)).toMatchObject({
+      state: "accepted",
+      errorCode: null,
+      agentId: "agent-a",
+      workspaceId: "workspace-a",
+    });
+    expect(await fixture.store.findOwnedAgent(alice, "agent-a")).toMatchObject({
+      launchOperationId: launch.id,
     });
   });
 

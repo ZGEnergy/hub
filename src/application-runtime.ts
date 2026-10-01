@@ -30,6 +30,7 @@ import { TriggerDashboard } from "./triggers/dashboard.js";
 import type { ProviderApplications } from "./provider-applications/index.js";
 import { DaemonProviderCatalog } from "./daemons/provider-catalog.js";
 import { HomeDashboard } from "./home/dashboard.js";
+import { createConnectorService } from "./paseo-connector/service.js";
 import type { ProviderConnectionRegistration } from "./providers/registration.js";
 
 export interface ApplicationCompositionOptions {
@@ -154,7 +155,7 @@ async function createOwnedApplicationRuntime(
     homeDashboard: homeDashboardFor(options, connections),
     ...entitlementSurfaces(options),
     testTriggerRoutes: options.testTriggerRoutes ?? false,
-    paseoConnector: paseoConnectorFor(options),
+    paseoConnector: paseoConnectorFor(options, application.hub),
     auth: (request) => {
       if (options.database === null) {
         return Promise.resolve(Response.json({ error: "database_unavailable" }, { status: 503 }));
@@ -462,10 +463,21 @@ function requireBilling(options: ApplicationCompositionOptions): {
   return { billing: options.billing, database: options.database };
 }
 
-function paseoConnectorFor(options: ApplicationCompositionOptions): PaseoConnectorAccess {
+function paseoConnectorFor(
+  options: ApplicationCompositionOptions,
+  hub: import("./app.js").HubRuntime,
+): PaseoConnectorAccess {
   if (options.database === null || options.auth === null) return { status: "database_unavailable" };
   if (options.auth.connector === undefined) return { status: "disabled" };
-  return { status: "enabled", oauth: options.auth.connector, database: options.database };
+  return {
+    status: "enabled",
+    oauth: options.auth.connector,
+    database: options.database,
+    service: createConnectorService({
+      database: options.database,
+      connectionForDaemon: (daemonId) => hub.connectionForDaemon(daemonId),
+    }),
+  };
 }
 
 function requireAuth(options: ApplicationCompositionOptions): AuthServer {
