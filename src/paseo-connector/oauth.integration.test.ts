@@ -232,6 +232,22 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
     );
   }
 
+  /** A token request carrying `resources` as repeated `resource` fields (none when empty). */
+  function tokenWithResources(
+    form: Record<string, string>,
+    resources: readonly string[],
+  ): Promise<Response> {
+    const body = new URLSearchParams(form);
+    for (const resource of resources) body.append("resource", resource);
+    return auth.handle(
+      new Request(`${ORIGIN}/api/auth/oauth2/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+      }),
+    );
+  }
+
   async function registerClient(): Promise<string> {
     const response = await auth.handle(
       new Request(`${ORIGIN}/api/auth/oauth2/register`, {
@@ -400,24 +416,32 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
     ]);
   });
 
-  it("rejects another resource, a missing resource, and grants the connector does not offer", async () => {
+  it("rejects any other resource and grants the connector does not offer, minting nothing", async () => {
     const { browser, machine } = await operator();
     const clientId = await registerClient();
     const { code, verifier } = await linkMachine(browser, clientId, machine);
-    const exchangeWith = (resource?: string) =>
-      token({
-        grant_type: "authorization_code",
-        client_id: clientId,
-        code,
-        code_verifier: verifier,
-        redirect_uri: REDIRECT_URI,
-        ...(resource === undefined ? {} : { resource }),
-      });
+    const exchangeWith = (resources: readonly string[]) =>
+      tokenWithResources(
+        {
+          grant_type: "authorization_code",
+          client_id: clientId,
+          code,
+          code_verifier: verifier,
+          redirect_uri: REDIRECT_URI,
+        },
+        resources,
+      );
 
-    expect(await errorOf(await exchangeWith("https://elsewhere.example/mcp"))).toBe(
-      "invalid_target",
-    );
-    expect(await errorOf(await exchangeWith())).toBe("invalid_target");
+    for (const resources of [
+      ["https://elsewhere.example/mcp"],
+      [`${ORIGIN}/mcp/other`],
+      [RESOURCE, RESOURCE],
+      [`${RESOURCE}?tenant=1`],
+      [`${RESOURCE}#tools`],
+      ["not a url"],
+    ]) {
+      expect(await errorOf(await exchangeWith(resources))).toBe("invalid_target");
+    }
     const clientCredentials = await token({
       grant_type: "client_credentials",
       client_id: clientId,
@@ -425,10 +449,65 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
       resource: RESOURCE,
     });
     expect(await errorOf(clientCredentials)).toBe("unsupported_grant_type");
+    expect(await refreshTokenRows(clientId)).toBe(0);
     // The rejected attempts never reached the code: the valid exchange still succeeds.
     expect(jwtClaims((await exchange(clientId, code, verifier)).access_token)["aud"]).toBe(
       RESOURCE,
     );
+  });
+
+  it("applies the connector resource when a code or refresh grant names none", async () => {
+    const { browser, machine } = await operator();
+    const clientId = await registerClient();
+    const { code, verifier } = await linkMachine(browser, clientId, machine);
+    const exchanged = await tokenWithResources(
+      {
+        grant_type: "authorization_code",
+        client_id: clientId,
+        code,
+        code_verifier: verifier,
+        redirect_uri: REDIRECT_URI,
+      },
+      [],
+    );
+    expect(exchanged.status).toBe(200);
+    const tokens = tokenResponseSchema.parse(await exchanged.json());
+    expect(jwtClaims(tokens.access_token)["aud"]).toBe(RESOURCE);
+
+    const refreshed = await tokenWithResources(
+      {
+        grant_type: "refresh_token",
+        client_id: clientId,
+        refresh_token: tokens.refresh_token ?? "",
+      },
+      [],
+    );
+    expect(refreshed.status).toBe(200);
+    expect(jwtClaims(tokenResponseSchema.parse(await refreshed.json()).access_token)["aud"]).toBe(
+      RESOURCE,
+    );
+  });
+
+  it("accepts a canonically equal resource and binds the token to the canonical one", async () => {
+    const { browser, machine } = await operator();
+    const clientId = await registerClient();
+    for (const resource of [`${RESOURCE}/`, "HTTP://LOCALHOST:3000/mcp/paseo"]) {
+      const { code, verifier } = await linkMachine(browser, clientId, machine);
+      const exchanged = await tokenWithResources(
+        {
+          grant_type: "authorization_code",
+          client_id: clientId,
+          code,
+          code_verifier: verifier,
+          redirect_uri: REDIRECT_URI,
+        },
+        [resource],
+      );
+      expect(exchanged.status).toBe(200);
+      const tokens = tokenResponseSchema.parse(await exchanged.json());
+      expect(jwtClaims(tokens.access_token)["aud"]).toBe(RESOURCE);
+      expect((await principalOf(tokens)).userId).toBe(await browser.userId());
+    }
   });
 
   it("never consents without a machine selected for this authorization", async () => {

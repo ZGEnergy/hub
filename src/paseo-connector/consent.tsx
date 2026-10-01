@@ -19,7 +19,12 @@ import { SummaryPanel, type SummaryRow } from "../components/app/summary-panel.j
 import { TwoLine } from "../components/app/two-line.js";
 import { Button } from "../components/ui/button.js";
 import type { Result } from "../contract/respond.js";
-import { CONNECTOR_FLOW_PARAM, RESTART_FROM_CLIENT, type ConnectorScope } from "./contracts.js";
+import {
+  CONNECTOR_FLOW_PARAM,
+  CONNECTOR_PRODUCT_NAME,
+  RESTART_FROM_CLIENT,
+  type ConnectorScope,
+} from "./contracts.js";
 import type { ConnectorConsentSummary, ConnectorMachine, ConnectorRedirect } from "./flow.js";
 import {
   decidePaseoConnectorConsent,
@@ -109,7 +114,7 @@ function UnusableRequest({
   );
 }
 
-const MISSING_REQUEST = `This page needs the authorization request an MCP client sends when it connects to the Paseo Agent Connector. ${RESTART_FROM_CLIENT}`;
+const MISSING_REQUEST = `This page needs the authorization request an MCP client sends when it connects to the ${CONNECTOR_PRODUCT_NAME}. ${RESTART_FROM_CLIENT}`;
 const EXPIRED_REQUEST = `This authorization request expired. ${RESTART_FROM_CLIENT}`;
 
 function machineOption(machine: ConnectorMachine): ComboboxOption {
@@ -125,12 +130,10 @@ function machineOption(machine: ConnectorMachine): ComboboxOption {
 }
 
 const CONNECT_TITLE = "Connect a machine";
-const CONNECT_DESCRIPTION =
-  "Choose the one machine and working directory this Paseo Agent Connector connection may use. You approve what it can do on the next step.";
+const CONNECT_DESCRIPTION = `Choose the one machine and working directory the app connecting through the ${CONNECTOR_PRODUCT_NAME} may use. You approve what it can do on the next step.`;
 const NO_MACHINES = {
   title: "No machines to connect",
-  description:
-    "Only owners and admins can connect an organization's machines to the Paseo Agent Connector. Enroll a Paseo daemon in an organization you manage, then start connecting again from your MCP client.",
+  description: `Only owners and admins can connect an organization's machines to the ${CONNECTOR_PRODUCT_NAME}. Enroll a Paseo daemon in an organization you manage, then start connecting again from your MCP client.`,
 };
 const MACHINES_FAILURE = "Hub did not return your machines. Check your connection and try again.";
 const SELECT_FAILURE =
@@ -299,9 +302,12 @@ export function ConnectorConnect() {
   );
 }
 
+/** How a client's self-declared name is shown wherever Hub names the app. */
+const NO_CLIENT_NAME = "No name given";
+const UNVERIFIED_CLIENT_NAME = "Name provided by the app itself, not verified by Hub";
+
 const CONSENT_TITLE = "Approve access";
-const CONSENT_DESCRIPTION =
-  "Review what this app may do through the Paseo Agent Connector on the machine you chose, then approve or deny it.";
+const CONSENT_DESCRIPTION = `Review what this app may do through the ${CONNECTOR_PRODUCT_NAME} on the machine you chose, then approve or deny it.`;
 const CONSENT_FAILURE = "Hub did not return this authorization. Check your connection and reload.";
 const DECISION_FAILURE =
   "Hub did not receive your decision. Check your connection and submit again.";
@@ -436,8 +442,8 @@ function ConsentSummary({ summary }: { summary: ConnectorConsentSummary }) {
         label: "App",
         value: (
           <TwoLine
-            primary={summary.clientName ?? "No name given"}
-            secondary="Name provided by the app itself, not verified by Hub"
+            primary={summary.clientName ?? NO_CLIENT_NAME}
+            secondary={UNVERIFIED_CLIENT_NAME}
             wrap
           />
         ),
@@ -469,6 +475,7 @@ function ConsentSummary({ summary }: { summary: ConnectorConsentSummary }) {
 }
 
 const CONNECTION_COLUMNS = [
+  { header: "App" },
   { header: "Machine" },
   { header: "Permissions" },
   { header: "Connected" },
@@ -477,8 +484,7 @@ const CONNECTION_COLUMNS = [
 ];
 const NO_CONNECTIONS = {
   title: "No connections",
-  description:
-    "Connect an MCP client to the Paseo Agent Connector and the connection appears here.",
+  description: `Connect an MCP client to the ${CONNECTOR_PRODUCT_NAME} and the connection appears here.`,
 };
 const CONNECTIONS_FAILURE =
   "Hub did not return your connections. Check your connection and reload.";
@@ -509,7 +515,7 @@ export function ConnectorConnections() {
   const header = (
     <PageHeader
       title="Connected apps"
-      description="Apps you connected through the Paseo Agent Connector, each limited to one machine and one working directory. Revoking one blocks its further access but does not stop agents already running."
+      description={`Apps you connected through the ${CONNECTOR_PRODUCT_NAME}, each limited to one machine and one working directory. Revoking one blocks its further access but does not stop agents already running.`}
     />
   );
   if (connections.isPending) {
@@ -579,8 +585,12 @@ function ConnectionRow({
     [onRevoke, record.connectionId],
   );
   const machine = record.machineName ?? "Removed machine";
+  const app = record.clientName ?? NO_CLIENT_NAME;
   return (
     <DataRow>
+      <DataCell>
+        <TwoLine primary={app} secondary={UNVERIFIED_CLIENT_NAME} />
+      </DataCell>
       <DataCell>
         <TwoLine primary={machine} secondary={record.workingDirectory} mono />
       </DataCell>
@@ -597,12 +607,12 @@ function ConnectionRow({
       </DataCell>
       <DataCell align="end">
         {record.revokedAt === null ? (
-          <RowActions label={`Actions for ${machine} ${record.workingDirectory}`}>
+          <RowActions label={`Actions for ${app} on ${machine} ${record.workingDirectory}`}>
             <ConfirmMenuItem
               label="Revoke"
               destructive
               title="Revoke this connection?"
-              description={`The app loses access to ${machine} through this connection right away. Agents it already started keep running.`}
+              description={`${record.clientName ?? "The app"} loses access to ${machine} through this connection right away. Agents it already started keep running.`}
               confirmLabel="Revoke connection"
               cancelLabel="Cancel"
               busy={busy}

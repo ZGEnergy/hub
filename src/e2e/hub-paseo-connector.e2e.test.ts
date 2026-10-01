@@ -590,8 +590,12 @@ describeConnector("Paseo Agent Connector against a real daemon and real agents",
     await page.goto(`${origin}/oauth/connections`);
     const table = page.getByRole("table", { name: "Connected apps" });
     const row = table.getByRole("row").filter({ hasText: workingDirectory });
+    // The row names the app by the name it registered, so the right client's access is revoked.
+    await row.getByText(CLIENT_NAME, { exact: true }).waitFor();
     await row
-      .getByRole("button", { name: `Actions for ${machineName} ${workingDirectory}` })
+      .getByRole("button", {
+        name: `Actions for ${CLIENT_NAME} on ${machineName} ${workingDirectory}`,
+      })
       .click();
     await page.getByRole("menuitem", { name: "Revoke" }).click();
     await page.getByRole("alertdialog").getByRole("button", { name: "Revoke connection" }).click();

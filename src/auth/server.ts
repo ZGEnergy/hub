@@ -43,6 +43,7 @@ import { oauthProviderAuthServerMetadata } from "@better-auth/oauth-provider";
 import { createDatabase } from "../db/pg.js";
 import {
   assertRefreshGrantCurrent,
+  canonicalTokenResource,
   connectorOAuthEndpoints,
   connectorOAuthPlugins,
   protectedResourceMetadata,
@@ -52,6 +53,7 @@ import { CONNECTOR_PRODUCT_NAME, ConnectorError } from "../paseo-connector/contr
 import { reportFailure } from "../failures/index.js";
 import {
   ConnectorFlowError,
+  connectionClientName,
   decideConnectorConsent,
   describeConnectorConsent,
   listConnectorConnections,
@@ -481,6 +483,8 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
         listMemberDaemons: (userId) => listMemberDaemons(options.database, userId),
         authorize: (path, body) => authorizeAsBrowser(path, body, headers),
         oauthClientName: (clientId) => oauthClientName(options.database, clientId),
+        connectionClientName: (userId, connectionId) =>
+          connectionClientName(options.database, userId, connectionId),
         now: () => new Date(),
       };
     };
@@ -564,10 +568,12 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
   }
 
   /**
-   * Admits a token request only as a plain form whose single `resource` is the connector, and
-   * hands the library that exact form re-encoded, so Hub and the library read the same fields.
-   * Without the resource the library would mint an opaque token outside the connector's claim
-   * checks; every token Hub issues is a connector JWT for exactly this resource.
+   * Admits a token request only as a plain form naming the connector as its one resource (or, for
+   * a code or refresh grant, naming none: Hub applies its only resource), and hands the library
+   * that form re-encoded with the canonical resource, so Hub and the library read the same fields.
+   * The library never sees a request without the resource, which would mint an opaque token
+   * outside the connector's claim checks; every token Hub issues is a connector JWT for exactly
+   * this resource.
    */
   async function connectorTokenRequest(request: Request, headers: Headers): Promise<Response> {
     const mediaType = (request.headers.get("content-type") ?? "").split(";", 1)[0]!.trim();
@@ -575,13 +581,21 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
       return tokenRequestError("invalid_request", "the token request must be a form");
     }
     const form = new URLSearchParams(await request.text());
-    const resources = form.getAll("resource");
-    if (resources.length !== 1 || resources[0] !== connectorEndpoints?.resource) {
+    const resource =
+      connectorEndpoints === undefined
+        ? undefined
+        : canonicalTokenResource(
+            connectorEndpoints,
+            form.get("grant_type"),
+            form.getAll("resource"),
+          );
+    if (resource === undefined) {
       return tokenRequestError(
         "invalid_target",
         `resource must be the ${CONNECTOR_PRODUCT_NAME} MCP endpoint`,
       );
     }
+    form.set("resource", resource);
     if (form.get("grant_type") === "refresh_token") {
       const refused = await refreshGrantRefusal(form.get("refresh_token"));
       if (refused !== undefined) return refused;

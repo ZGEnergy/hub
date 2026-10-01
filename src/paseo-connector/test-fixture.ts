@@ -159,7 +159,7 @@ export class FakeDaemon implements AgentConnection {
   }
 }
 
-/** A connected machine whose provider catalog is one ready Claude runtime. */
+/** A connected machine whose provider catalog is two ready runtimes, Claude and Codex. */
 export function daemonConnection(daemon: FakeDaemon): DaemonConnection {
   return {
     agents: daemon,
@@ -176,6 +176,18 @@ export function daemonConnection(daemon: FakeDaemon): DaemonConnection {
             models: [{ provider: "claude", id: "opus", label: "Opus", isDefault: true }],
             modes: [{ id: "default", label: "Default" }],
             defaultModeId: "default",
+          },
+          {
+            provider: "codex",
+            status: "ready",
+            enabled: true,
+            label: "Codex",
+            models: [
+              { provider: "codex", id: "codex-large", label: "Codex large", isDefault: true },
+              { provider: "codex", id: "codex-small", label: "Codex small" },
+            ],
+            modes: [{ id: "auto", label: "Auto" }],
+            defaultModeId: "auto",
           },
         ],
         generatedAt: new Date().toISOString(),

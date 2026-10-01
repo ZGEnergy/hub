@@ -55,6 +55,8 @@ export interface ConnectorMachine {
 
 export interface ConnectorConnectionSummary {
   connectionId: string;
+  /** The name the connection's OAuth client registered for itself, unverified; null when none. */
+  clientName: string | null;
   organizationId: string;
   daemonId: string;
   /** The machine's current name, or null once its daemon record is gone. */
@@ -114,6 +116,8 @@ export interface ConnectorFlowContext {
   authorize(path: "continue" | "consent", body: Record<string, unknown>): Promise<string>;
   /** The registered `client_name` of an OAuth client, or null. */
   oauthClientName(clientId: string): Promise<string | null>;
+  /** The registered `client_name` of the OAuth client the user approved for a connection. */
+  connectionClientName(userId: string, connectionId: string): Promise<string | null>;
   now(): Date;
 }
 
@@ -318,6 +322,10 @@ export async function listConnectorConnections(
   return Promise.all(
     connections.map(async (connection) => ({
       connectionId: connection.connectionId,
+      clientName: await context.connectionClientName(
+        context.account.userId,
+        connection.connectionId,
+      ),
       organizationId: connection.organizationId,
       daemonId: connection.daemonId,
       machineName:
@@ -395,6 +403,28 @@ export async function oauthClientName(
   const result = await runtime.query<{ name: string | null }>(
     "select name from oauth_client where client_id = $1",
     [clientId],
+  );
+  const name = result.rows[0]?.name?.trim();
+  return name === undefined || name === "" ? null : name;
+}
+
+/**
+ * The `client_name` of the OAuth client a connection was approved for. The library records each
+ * approval as a consent row whose reference is the connection; null when the client gave no name
+ * or its registration is gone.
+ */
+export async function connectionClientName(
+  runtime: DatabaseRuntime,
+  userId: string,
+  connectionId: string,
+): Promise<string | null> {
+  const result = await runtime.query<{ name: string | null }>(
+    `select oauth_client.name from oauth_consent
+     join oauth_client on oauth_client.client_id = oauth_consent.client_id
+     where oauth_consent.user_id = $1 and oauth_consent.reference_id = $2
+     order by oauth_consent.created_at
+     limit 1`,
+    [userId, connectionId],
   );
   const name = result.rows[0]?.name?.trim();
   return name === undefined || name === "" ? null : name;

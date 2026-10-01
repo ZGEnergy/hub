@@ -52,6 +52,12 @@ const LOOPBACK_CLIENT = {
   name: "Loopback Desktop Agent",
   redirectUri: "http://127.0.0.1:43117/callback",
 };
+/** RFC 8252 §7.3: a native app's loopback listener gets whatever port is free at run time. */
+const LOOPBACK_OTHER_PORT = "http://127.0.0.1:51234/callback";
+const LOCALHOST_CLIENT = {
+  name: "Localhost Desktop Agent",
+  redirectUri: "http://localhost:43118/callback",
+};
 const SECRET = "connector-interop-test-secret-at-least-32-characters";
 const SCOPES = "paseo:read paseo:run paseo:cancel offline_access";
 const WORKING_DIRECTORY = "/srv/work/project";
@@ -73,9 +79,9 @@ const AuthorizationServerMetadata = z.object({
   authorization_endpoint: z.string(),
   token_endpoint: z.string(),
   registration_endpoint: z.string(),
+  revocation_endpoint: z.string(),
 });
-const AccessToken = z.object({ access_token: z.string() });
-const Tokens = AccessToken.extend({ refresh_token: z.string() });
+const Tokens = z.object({ access_token: z.string(), refresh_token: z.string() });
 const OAuthError = z.object({ error: z.string() });
 const ConnectionContent = z.object({
   connectionId: z.string(),
@@ -242,19 +248,19 @@ describe.each(["embedded", "postgres"] as const)(
     }
     type RegisteredClient = Awaited<ReturnType<typeof register>>;
 
-    /**
-     * The client's authorization request with PKCE S256 and the resource, then the user's own
-     * steps on Hub's connect and consent pages (through the server-function surface those pages
-     * call). Returns the code the client's callback receives.
-     */
-    async function authorize(user: Operator, client: RegisteredClient) {
+    /** The client's authorization request with PKCE S256 and the resource, as the browser sends it. */
+    async function requestAuthorization(
+      user: Operator,
+      client: RegisteredClient,
+      redirectUri: string,
+    ) {
       const verifier = randomBytes(32).toString("base64url");
       const state = randomUUID();
       const authorization = await navigate(
         `${client.discovered.authorization_endpoint}?${new URLSearchParams({
           response_type: "code",
           client_id: client.clientId,
-          redirect_uri: client.redirectUri,
+          redirect_uri: redirectUri,
           scope: SCOPES,
           state,
           code_challenge: createHash("sha256").update(verifier).digest("base64url"),
@@ -264,7 +270,24 @@ describe.each(["embedded", "postgres"] as const)(
         user.browser.headers().get("cookie") ?? "",
       );
       expect(authorization.status).toBe(302);
-      const connect = new URL(authorization.location ?? "", origin);
+      return { location: new URL(authorization.location ?? "", origin), verifier, state };
+    }
+
+    /**
+     * The authorization request, then the user's own steps on Hub's connect and consent pages
+     * (through the server-function surface those pages call). Returns the code the client's
+     * callback receives.
+     */
+    async function authorize(
+      user: Operator,
+      client: RegisteredClient,
+      redirectUri = client.redirectUri,
+    ) {
+      const {
+        location: connect,
+        verifier,
+        state,
+      } = await requestAuthorization(user, client, redirectUri);
       expect(connect.pathname).toBe("/oauth/connect");
 
       const connector = auth.connector!;
@@ -283,18 +306,18 @@ describe.each(["embedded", "postgres"] as const)(
       // The consent page names the app that asked, by its own registration.
       expect(await connector.describeConsent(consent, user.browser.headers())).toMatchObject({
         clientName: client.name,
-        redirectTarget: new URL(client.redirectUri).origin,
+        redirectTarget: new URL(redirectUri).origin,
       });
       const approved = await connector.decideConsent(
         { ...consent, accept: true },
         user.browser.headers(),
       );
       const callback = new URL(approved.redirectTo);
-      expect(`${callback.origin}${callback.pathname}`).toBe(client.redirectUri);
+      expect(`${callback.origin}${callback.pathname}`).toBe(redirectUri);
       expect(callback.searchParams.get("state")).toBe(state);
       const code = callback.searchParams.get("code");
       expect(code).not.toBeNull();
-      return { code: code!, verifier };
+      return { code: code!, verifier, redirectUri };
     }
 
     function token(client: RegisteredClient, form: Record<string, string>): Promise<Response> {
@@ -309,22 +332,21 @@ describe.each(["embedded", "postgres"] as const)(
       });
     }
 
-    /** The PKCE code exchange, presented by `presenter` for a code issued to `client`. */
+    /** The PKCE code exchange of `grant`, presented by `presenter`. */
     function exchange(
       presenter: RegisteredClient,
-      client: RegisteredClient,
-      grant: { code: string; verifier: string },
+      grant: { code: string; verifier: string; redirectUri: string },
     ): Promise<Response> {
       return token(presenter, {
         grant_type: "authorization_code",
         code: grant.code,
         code_verifier: grant.verifier,
-        redirect_uri: client.redirectUri,
+        redirect_uri: grant.redirectUri,
       });
     }
 
-    async function link(user: Operator, client: RegisteredClient) {
-      const exchanged = await exchange(client, client, await authorize(user, client));
+    async function link(user: Operator, client: RegisteredClient, redirectUri?: string) {
+      const exchanged = await exchange(client, await authorize(user, client, redirectUri));
       expect(exchanged.status).toBe(200);
       return Tokens.parse(await exchanged.json());
     }
@@ -337,26 +359,40 @@ describe.each(["embedded", "postgres"] as const)(
       return jwtClaims(accessToken)[`${origin}/claims/paseo-connection`];
     }
 
-    /** Starts an agent with a provider, model and mode chosen from the client's own catalog. */
-    async function startFromCatalog(client: Client) {
+    type Runtime = z.infer<typeof RuntimesContent>["runtimes"][number];
+    const firstReady = (runtimes: Runtime[]) => runtimes.find(usable);
+    const lastReady = (runtimes: Runtime[]) => runtimes.findLast(usable);
+    function usable(runtime: Runtime): boolean {
+      return runtime.status === "ready" && runtime.enabled;
+    }
+
+    /**
+     * Starts an agent with the provider `pick` chooses from the client's own catalog, its
+     * non-default model when it has one (else its default) and its default mode.
+     */
+    async function startFromCatalog(
+      client: Client,
+      pick: (runtimes: Runtime[]) => Runtime | undefined,
+    ) {
       const { runtimes } = RuntimesContent.parse(
         (await callTool(client, "list_runtimes")).structured,
       );
-      const runtime = runtimes.find((entry) => entry.status === "ready" && entry.enabled);
+      const runtime = pick(runtimes);
       expect(runtime).toBeDefined();
-      const model = runtime!.models.find((entry) => entry.isDefault) ?? runtime!.models[0];
+      const model = (runtime!.models.find((entry) => !entry.isDefault) ?? runtime!.models[0])?.id;
+      const mode = runtime!.defaultModeId ?? undefined;
       const started = await callTool(client, "start_agent", {
         request_key: randomUUID(),
         task: "Make the suite green",
         title: "Fix tests",
         provider: runtime!.provider,
-        ...(model === undefined ? {} : { model: model.id }),
-        ...(runtime!.defaultModeId === null ? {} : { mode: runtime!.defaultModeId }),
+        ...(model === undefined ? {} : { model }),
+        ...(mode === undefined ? {} : { mode }),
       });
       expect(started.isError).toBe(false);
       const operation = OperationContent.parse(started.structured);
       expect(operation.state).toBe("accepted");
-      return operation.agentId!;
+      return { agentId: operation.agentId!, provider: runtime!.provider, model, mode };
     }
 
     async function listedAgents(client: Client): Promise<string[]> {
@@ -420,22 +456,40 @@ describe.each(["embedded", "postgres"] as const)(
         expect(connectionA.connectionId).not.toBe(connectionB.connectionId);
         expect(connectionOf(hostedTokens.access_token)).toBe(connectionA.connectionId);
         expect(connectionOf(loopbackTokens.access_token)).toBe(connectionB.connectionId);
+        // Connected apps lists each connection under the name its own client registered.
         const listed = await auth.connector!.listConnections(user.browser.headers());
-        expect(listed.map((connection) => connection.connectionId).toSorted()).toEqual(
-          [connectionA.connectionId, connectionB.connectionId].toSorted(),
+        expect(listed).toHaveLength(2);
+        expect(listed).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              connectionId: connectionA.connectionId,
+              clientName: HOSTED_CLIENT.name,
+            }),
+            expect.objectContaining({
+              connectionId: connectionB.connectionId,
+              clientName: LOOPBACK_CLIENT.name,
+            }),
+          ]),
         );
 
-        // The runtime catalog and what a launch asks of the machine do not depend on the caller.
-        expect((await callTool(a, "list_runtimes")).structured).toEqual(
-          (await callTool(b, "list_runtimes")).structured,
-        );
-        const agentA = await startFromCatalog(a);
-        const agentB = await startFromCatalog(b);
+        // Both callers see the same catalog, and each launch runs exactly the caller's own pick.
+        const catalog = (await callTool(a, "list_runtimes")).structured;
+        expect((await callTool(b, "list_runtimes")).structured).toEqual(catalog);
+        const startedA = await startFromCatalog(a, firstReady);
+        const startedB = await startFromCatalog(b, lastReady);
+        expect(startedA.provider).not.toBe(startedB.provider);
         expect(user.daemon.createOptions).toHaveLength(2);
-        expect(user.daemon.createOptions[1]).toEqual(user.daemon.createOptions[0]);
+        for (const [index, started] of [startedA, startedB].entries()) {
+          expect(user.daemon.createOptions[index]).toMatchObject({
+            provider: started.provider,
+            model: started.model,
+            mode: started.mode,
+            cwd: WORKING_DIRECTORY,
+          });
+        }
 
-        await expectOwnedOnlyBy(a, b, agentA, user.daemon);
-        await expectOwnedOnlyBy(b, a, agentB, user.daemon);
+        await expectOwnedOnlyBy(a, b, startedA.agentId, user.daemon);
+        await expectOwnedOnlyBy(b, a, startedB.agentId, user.daemon);
       } finally {
         await a.close();
         await b.close();
@@ -457,8 +511,8 @@ describe.each(["embedded", "postgres"] as const)(
         expect((await callTool(a, "list_runtimes")).structured).toEqual(
           (await callTool(b, "list_runtimes")).structured,
         );
-        const agentA = await startFromCatalog(a);
-        const agentB = await startFromCatalog(b);
+        const agentA = (await startFromCatalog(a, firstReady)).agentId;
+        const agentB = (await startFromCatalog(b, firstReady)).agentId;
         expect(first.daemon.createOptions).toEqual(second.daemon.createOptions);
         expect(second.daemon.agents.has(agentA)).toBe(false);
         expect(first.daemon.agents.has(agentB)).toBe(false);
@@ -483,28 +537,64 @@ describe.each(["embedded", "postgres"] as const)(
       // Another client presenting the code, verifier and redirect issued to `hosted` is refused.
       // The pinned library consumes the code before it compares clients, so the code is spent.
       const grant = await authorize(user, hosted);
-      expect(await oauthError(await exchange(loopback, hosted, grant))).toEqual({
+      expect(await oauthError(await exchange(loopback, grant))).toEqual({
         status: 401,
         error: "invalid_client",
       });
-      expect(await oauthError(await exchange(hosted, hosted, grant))).toEqual({
+      expect(await oauthError(await exchange(hosted, grant))).toEqual({
         status: 401,
         error: "invalid_grant",
       });
 
       // A refresh token presented by the other client is refused without spending it.
       const tokens = await link(user, hosted);
-      const refresh = (presenter: RegisteredClient) =>
-        token(presenter, { grant_type: "refresh_token", refresh_token: tokens.refresh_token });
-      expect(await oauthError(await refresh(loopback))).toEqual({
+      const refresh = (presenter: RegisteredClient, refreshToken: string) =>
+        token(presenter, { grant_type: "refresh_token", refresh_token: refreshToken });
+      const revoke = (presenter: RegisteredClient, refreshToken: string) =>
+        fetch(discovered.revocation_endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            client_id: presenter.clientId,
+            token: refreshToken,
+            token_type_hint: "refresh_token",
+          }).toString(),
+        });
+      expect(await oauthError(await refresh(loopback, tokens.refresh_token))).toEqual({
         status: 400,
         error: "invalid_client",
       });
-      const refreshed = await refresh(hosted);
+      // RFC 7009: revocation by another client answers 200 and changes nothing.
+      expect((await revoke(loopback, tokens.refresh_token)).status).toBe(200);
+      const refreshed = await refresh(hosted, tokens.refresh_token);
       expect(refreshed.status).toBe(200);
-      expect(connectionOf(AccessToken.parse(await refreshed.json()).access_token)).toBe(
-        connectionOf(tokens.access_token),
+      const rotated = Tokens.parse(await refreshed.json());
+      expect(connectionOf(rotated.access_token)).toBe(connectionOf(tokens.access_token));
+
+      // A public client revokes its own refresh token with its client_id alone.
+      expect((await revoke(hosted, rotated.refresh_token)).status).toBe(200);
+      expect(await oauthError(await refresh(hosted, rotated.refresh_token))).toEqual({
+        status: 400,
+        error: "invalid_grant",
+      });
+    });
+
+    it("accepts a loopback IP callback on any port, but a localhost one only on its own", async () => {
+      const user = await operator();
+      const discovered = await discover();
+      const loopback = await register(discovered, LOOPBACK_CLIENT);
+      const tokens = await link(user, loopback, LOOPBACK_OTHER_PORT);
+      expect(jwtClaims(tokens.access_token)["aud"]).toBe(discovered.resource);
+
+      // The pinned library ignores the port only for loopback IP literals, not for `localhost`.
+      const localhost = await register(discovered, LOCALHOST_CLIENT);
+      const refused = await requestAuthorization(
+        user,
+        localhost,
+        "http://localhost:43119/callback",
       );
+      expect(refused.location.pathname).not.toBe("/oauth/connect");
+      expect(refused.location.searchParams.get("error")).toBe("invalid_redirect");
     });
   },
 );

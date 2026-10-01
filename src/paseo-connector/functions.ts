@@ -111,6 +111,7 @@ export const revokePaseoConnectorConnection = createServerFn({ method: "POST" })
 function connectionView(connection: ConnectorConnectionSummary): ConnectorConnectionView {
   return {
     connectionId: connection.connectionId,
+    clientName: connection.clientName,
     organizationId: connection.organizationId,
     daemonId: connection.daemonId,
     machineName: connection.machineName,

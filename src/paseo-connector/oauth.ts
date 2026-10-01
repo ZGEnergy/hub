@@ -72,6 +72,40 @@ export function connectorOAuthEndpoints(publicOrigin: string): ConnectorOAuthEnd
   };
 }
 
+/** The token grants a client may send without `resource`; Hub then applies its one resource. */
+const RESOURCE_DEFAULT_GRANTS = new Set(["authorization_code", "refresh_token"]);
+
+/**
+ * The `resource` a token request is forwarded with: the connector's canonical resource, or
+ * undefined (invalid_target). Absent on a code or refresh grant, Hub applies its only resource
+ * (RFC 8707 lets the authorization server choose a default). Present, it must be exactly one value
+ * that canonically names the connector: URL parsing folds scheme and host case and the default
+ * port, and one trailing slash on the path is ignored. A query, fragment or credentials never match.
+ */
+export function canonicalTokenResource(
+  endpoints: ConnectorOAuthEndpoints,
+  grantType: string | null,
+  resources: readonly string[],
+): string | undefined {
+  if (resources.length === 0) {
+    return grantType !== null && RESOURCE_DEFAULT_GRANTS.has(grantType)
+      ? endpoints.resource
+      : undefined;
+  }
+  const [value] = resources;
+  if (resources.length !== 1 || value === undefined || /[?#]/u.test(value)) return undefined;
+  if (!URL.canParse(value)) return undefined;
+  const url = new URL(value);
+  const expected = new URL(endpoints.resource);
+  const path = url.pathname.endsWith("/") ? url.pathname.slice(0, -1) : url.pathname;
+  const matches =
+    url.username === "" &&
+    url.password === "" &&
+    url.origin === expected.origin &&
+    path === expected.pathname;
+  return matches ? endpoints.resource : undefined;
+}
+
 /** Reads Hub's own JSON Web Key Set in process. */
 export type ConnectorJwksSource = Exclude<
   Parameters<typeof verifyJwsAccessToken>[1]["jwksFetch"],
