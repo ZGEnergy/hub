@@ -22,6 +22,9 @@ export class ScheduleTestDaemon implements DaemonConnection {
     restore: async () => true,
     control: async () => {},
     watch: async () => () => {},
+    timeline: async () => {
+      throw new Error("Timelines are not supported by this test daemon.");
+    },
   };
   async getProviderSnapshot(): Promise<import("../../hub/protocol.js").HubProviderSnapshot> {
     throw new Error("Provider catalog is not used by this test daemon.");

@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { expect, test, vi } from "vitest";
-import { DaemonAgents } from "./index.js";
+import {
+  DaemonAgentError,
+  DaemonAgents,
+  DaemonUnsupportedError,
+  isDaemonOutcomeUnknown,
+} from "./index.js";
 import { DaemonResponseLostError, type DaemonCreateAgentOptions } from "../protocol.js";
 
 const prompt = "Full request context. ".repeat(1_000) + "End.";
@@ -200,3 +205,178 @@ test.each(["create", "restore", "send"] as const)(
     }
   },
 );
+
+const CURRENT_EPOCH = "epoch-2";
+const entry = (seq: number, item: Record<string, unknown>, turnId = "turn-1") => ({
+  provider: "codex",
+  item,
+  turnId,
+  timestamp: `2026-09-30T10:00:0${seq}.000Z`,
+  seqStart: seq,
+  seqEnd: seq,
+  sourceSeqRanges: [{ startSeq: seq, endSeq: seq }],
+  collapsed: [],
+});
+const history = [
+  entry(1, { type: "user_message", text: "Summarize the repo" }),
+  entry(2, { type: "future_item_kind", payload: { anything: true } }),
+  entry(3, { type: "assistant_message", text: "The repo has three packages." }),
+];
+
+/** A daemon that holds one agent's timeline and answers like the real one, including stale epochs. */
+function timelineDaemon(): DaemonAgents {
+  const agents = new DaemonAgents((frame) => {
+    const { message } = z
+      .object({ message: z.record(z.string(), z.unknown()) })
+      .parse(JSON.parse(frame));
+    const requestId = message["requestId"];
+    const reply = (type: string, payload: Record<string, unknown>) =>
+      agents.receive({ type: "session", message: { type, payload: { requestId, ...payload } } });
+    if (message["type"] === "send_agent_message_request") {
+      reply("send_agent_message_response", {
+        accepted: false,
+        error: message["messageId"] === "pending" ? "agent_request_outcome_unknown" : "conflict",
+      });
+      return;
+    }
+    if (message["agentId"] === "rejected") {
+      reply("rpc_error", { error: "Permission denied" });
+      return;
+    }
+    const known = message["agentId"] === "agent";
+    const cursor = z
+      .object({ epoch: z.string(), seq: z.number() })
+      .optional()
+      .parse(message["cursor"]);
+    const stale = cursor !== undefined && cursor.epoch !== CURRENT_EPOCH;
+    const entries = known ? history : [];
+    reply("fetch_agent_timeline_response", {
+      agentId: message["agentId"],
+      agent: known
+        ? {
+            id: "agent",
+            workspaceId: "workspace",
+            status: "idle",
+            requiresAttention: true,
+            attentionReason: "finished",
+            pendingPermissions: [],
+          }
+        : null,
+      direction: stale ? "tail" : message["direction"],
+      projection: "projected",
+      epoch: CURRENT_EPOCH,
+      reset: stale,
+      staleCursor: stale,
+      gap: false,
+      window: { minSeq: 1, maxSeq: 3, nextSeq: 4 },
+      startCursor: entries.length ? { epoch: CURRENT_EPOCH, seq: 1 } : null,
+      endCursor: entries.length ? { epoch: CURRENT_EPOCH, seq: 3 } : null,
+      hasOlder: false,
+      hasNewer: false,
+      entries,
+      error: known ? null : `Agent not found: ${String(message["agentId"])}`,
+    });
+  });
+  enable(agents);
+  return agents;
+}
+
+test("a timeline page keeps the final assistant answer, its turn and ranges, and tolerates unknown item kinds", async () => {
+  const page = await timelineDaemon().timeline("agent", { direction: "tail", limit: 20 });
+  const answer = page.entries.at(-1);
+  expect(answer).toMatchObject({
+    provider: "codex",
+    turnId: "turn-1",
+    timestamp: "2026-09-30T10:00:03.000Z",
+    seqStart: 3,
+    seqEnd: 3,
+    sourceSeqRanges: [{ startSeq: 3, endSeq: 3 }],
+    item: { type: "assistant_message", text: "The repo has three packages." },
+  });
+  expect(page.entries[1]?.item).toMatchObject({ type: "future_item_kind" });
+  expect(page.endCursor).toEqual({ epoch: CURRENT_EPOCH, seq: 3 });
+  expect(page.agent).toMatchObject({
+    status: "idle",
+    requiresAttention: true,
+    attentionReason: "finished",
+    pendingPermissions: [],
+  });
+});
+
+test("a cursor from a previous epoch comes back flagged stale and reset", async () => {
+  const page = await timelineDaemon().timeline("agent", {
+    direction: "after",
+    cursor: { epoch: "epoch-1", seq: 2 },
+    limit: 20,
+  });
+  expect(page).toMatchObject({ staleCursor: true, reset: true, epoch: CURRENT_EPOCH });
+  expect(page.entries).toHaveLength(3);
+});
+
+test("a cursor from the current epoch is not stale", async () => {
+  const page = await timelineDaemon().timeline("agent", {
+    direction: "after",
+    cursor: { epoch: CURRENT_EPOCH, seq: 2 },
+    limit: 20,
+  });
+  expect(page).toMatchObject({ staleCursor: false, reset: false });
+});
+
+test("a missing agent rejects with the daemon's own error", async () => {
+  await expect(timelineDaemon().timeline("gone", { direction: "tail", limit: 20 })).rejects.toThrow(
+    new DaemonAgentError("Agent not found: gone"),
+  );
+});
+
+test("a rejected timeline request surfaces the daemon's reason", async () => {
+  await expect(
+    timelineDaemon().timeline("rejected", { direction: "tail", limit: 20 }),
+  ).rejects.toThrow("Permission denied");
+});
+
+test("a timeline whose acknowledgement is lost is an unknown outcome, not a rejection", async () => {
+  const agents = new DaemonAgents(() => {});
+  enable(agents);
+  const page = agents.timeline("agent", { direction: "tail", limit: 20 });
+  agents.close();
+  const error = await page.catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(DaemonResponseLostError);
+  expect(isDaemonOutcomeUnknown(error)).toBe(true);
+});
+
+test("a timeline that times out is lost too", async () => {
+  vi.useFakeTimers();
+  try {
+    const agents = new DaemonAgents(() => {});
+    enable(agents);
+    const page = agents
+      .timeline("agent", { direction: "tail", limit: 20 })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(await page).toBeInstanceOf(DaemonResponseLostError);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a daemon without the agent RPCs is reported as unsupported, and still reads as a daemon error", async () => {
+  const agents = new DaemonAgents(() => {});
+  const error = await agents
+    .timeline("agent", { direction: "tail", limit: 20 })
+    .catch((caught: unknown) => caught);
+  expect(error).toBeInstanceOf(DaemonUnsupportedError);
+  expect(error).toBeInstanceOf(DaemonAgentError);
+  expect(isDaemonOutcomeUnknown(error)).toBe(false);
+});
+
+test("only an unresolved send is classified as an unknown outcome", async () => {
+  const agents = timelineDaemon();
+  const unresolved = await agents
+    .send("agent", "pending", "hello")
+    .catch((caught: unknown) => caught);
+  const conflict = await agents.send("agent", "other", "hello").catch((caught: unknown) => caught);
+  expect(isDaemonOutcomeUnknown(unresolved)).toBe(true);
+  expect(isDaemonOutcomeUnknown(conflict)).toBe(false);
+  expect(isDaemonOutcomeUnknown(new DaemonAgentError("create_request_outcome_unknown"))).toBe(true);
+  expect(isDaemonOutcomeUnknown(new Error("agent_request_outcome_unknown"))).toBe(false);
+});

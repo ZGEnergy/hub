@@ -139,6 +139,9 @@ describe("durable Hub action acknowledgement state", () => {
             subscriptions--;
           };
         },
+        timeline: async () => {
+          throw new Error("not used");
+        },
         send: async (_agentId, messageId, text) => {
           deliveries.set(messageId, text);
           started();
@@ -465,6 +468,9 @@ class AcknowledgementConnection implements DaemonConnection {
     },
     control: async (_agentId, _workspaceId, action) => {
       this.actions.push(action);
+    },
+    timeline: async () => {
+      throw new Error("not used");
     },
     watch: async (_agentId, listener) =>
       this.on((event) => {

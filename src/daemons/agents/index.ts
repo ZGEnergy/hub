@@ -12,11 +12,56 @@ const SnapshotSchema = z.object({
   workspaceId: z.string(),
   status: HubExecutionAgentSnapshotSchema.shape.status,
   archivedAt: z.unknown().optional(),
+  pendingPermissions: z.array(z.record(z.string(), z.unknown())).optional(),
+  requiresAttention: z.boolean().optional(),
+  attentionReason: z.string().nullable().optional(),
+  lastError: z.string().optional(),
 });
 export type AgentSnapshot = z.infer<typeof SnapshotSchema>;
 export type AgentEvent =
   | { type: "agent_update"; agent: AgentSnapshot; timestamp: string }
   | { type: "agent_stream"; agentId: string; event: DaemonAgentStreamEvent; timestamp: string };
+
+/** Position in an agent's timeline; the epoch changes when the daemon rewrites that timeline. */
+export interface AgentTimelineCursor {
+  epoch: string;
+  seq: number;
+}
+const CursorSchema = z.object({ epoch: z.string(), seq: z.number().int().nonnegative() });
+/** Item bodies stay open so a new daemon item kind cannot break a page; only `type` is required. */
+const TimelineEntrySchema = z
+  .object({
+    provider: z.string(),
+    item: z.object({ type: z.string() }).passthrough(),
+    turnId: z.string().optional(),
+    timestamp: z.string(),
+    seqStart: z.number().int().nonnegative(),
+    seqEnd: z.number().int().nonnegative(),
+    sourceSeqRanges: z.array(
+      z.object({
+        startSeq: z.number().int().nonnegative(),
+        endSeq: z.number().int().nonnegative(),
+      }),
+    ),
+    collapsed: z.array(z.string()).optional(),
+  })
+  .passthrough();
+const TimelineResponseSchema = z.object({
+  agent: SnapshotSchema.nullable(),
+  epoch: z.string(),
+  reset: z.boolean(),
+  staleCursor: z.boolean(),
+  gap: z.boolean(),
+  startCursor: CursorSchema.nullable(),
+  endCursor: CursorSchema.nullable(),
+  hasOlder: z.boolean(),
+  hasNewer: z.boolean(),
+  entries: z.array(TimelineEntrySchema),
+  error: z.string().nullable(),
+});
+export type AgentTimelineEntry = z.infer<typeof TimelineEntrySchema>;
+export type AgentTimelinePage = Omit<z.infer<typeof TimelineResponseSchema>, "error">;
+
 export interface AgentConnection {
   create(
     key: string,
@@ -28,6 +73,11 @@ export interface AgentConnection {
   restore(workspaceId: string, timeoutMs?: number): Promise<boolean>;
   control(agentId: string, workspaceId: string, action: "interrupt" | "archive"): Promise<void>;
   watch(agentId: string, listener: (event: AgentEvent) => void): Promise<() => void>;
+  /** One bounded page of the daemon's projected timeline. `limit` is sent as given. */
+  timeline(
+    agentId: string,
+    input: { cursor?: AgentTimelineCursor; direction: "tail" | "before" | "after"; limit: number },
+  ): Promise<AgentTimelinePage>;
 }
 
 const EnvelopeSchema = z.object({
@@ -42,6 +92,18 @@ const ResultSchema = z
   .passthrough();
 
 export class DaemonAgentError extends Error {}
+/** The connected daemon predates the agent RPCs Hub needs. */
+export class DaemonUnsupportedError extends DaemonAgentError {}
+
+/** True when a durable request may or may not have taken effect, so the caller must not assume either. */
+export function isDaemonOutcomeUnknown(error: unknown): boolean {
+  if (error instanceof DaemonResponseLostError) return true;
+  return (
+    error instanceof DaemonAgentError &&
+    (error.message === "agent_request_outcome_unknown" ||
+      error.message.endsWith("_request_outcome_unknown"))
+  );
+}
 
 /** The ordinary daemon protocol. This channel knows nothing about Hub executions or triggers. */
 export class DaemonAgents implements AgentConnection {
@@ -221,6 +283,22 @@ export class DaemonAgents implements AgentConnection {
       if (listeners.size === 0) this.listeners.delete(agentId);
     };
   }
+  async timeline(
+    agentId: string,
+    input: { cursor?: AgentTimelineCursor; direction: "tail" | "before" | "after"; limit: number },
+  ): Promise<AgentTimelinePage> {
+    const result = await this.request({
+      type: "fetch_agent_timeline_request",
+      agentId,
+      direction: input.direction,
+      cursor: input.cursor,
+      limit: input.limit,
+      projection: "projected",
+    });
+    const { error, ...page } = TimelineResponseSchema.parse(result);
+    if (error !== null) throw new DaemonAgentError(error);
+    return page;
+  }
   private emit(agentId: string, event: AgentEvent): void {
     for (const listener of this.listeners.get(agentId) ?? []) listener(event);
   }
@@ -228,7 +306,8 @@ export class DaemonAgents implements AgentConnection {
     message: Record<string, unknown>,
     timeoutMs = 30_000,
   ): Promise<Record<string, unknown>> {
-    if (!this.supported) throw new DaemonAgentError("Update the Paseo daemon to run Hub agents");
+    if (!this.supported)
+      throw new DaemonUnsupportedError("Update the Paseo daemon to run Hub agents");
     const requestId = randomUUID();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
