@@ -4,22 +4,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import type { Server as HttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createApplicationRuntime } from "../application-runtime.js";
 import { composeEntitlements } from "../auth/entitlements.js";
 import { createAuthServer, type AuthServer } from "../auth/server.js";
-import {
-  DaemonAgentError,
-  type AgentConnection,
-  type AgentSnapshot,
-  type AgentTimelineCursor,
-  type AgentTimelineEntry,
-  type AgentTimelinePage,
-} from "../daemons/agents/index.js";
-import type { DaemonConnection, DaemonCreateAgentOptions } from "../daemons/protocol.js";
+import type { DaemonConnection } from "../daemons/protocol.js";
 import { createDatabase } from "../db/pg.js";
 import { embeddedDatabaseRuntime, type DatabaseRuntimeBundle } from "../db/runtime/index.js";
 import type { Database } from "../db/types.js";
@@ -28,31 +18,29 @@ import { Route as PaseoMcpRoute } from "../routes/mcp/paseo.js";
 import { startApplication, stopApplication } from "../server/runtime.js";
 import { CONNECTOR_FLOW_PARAM } from "./contracts.js";
 import { handlePaseoConnectorMcp } from "./server.js";
+import {
+  AgentsContent,
+  Browser,
+  callTool,
+  connectMcp,
+  daemonConnection,
+  enrollConnectorDaemon,
+  FakeDaemon,
+  jwtClaims,
+  OperationContent,
+  toolError,
+} from "./test-fixture.js";
 
 const ORIGIN = "http://localhost:3000";
 const RESOURCE = `${ORIGIN}/mcp/paseo`;
 const RESOURCE_METADATA = `${ORIGIN}/.well-known/oauth-protected-resource/mcp/paseo`;
 /** Another origin of the same Hub database: a real Hub-signed token for a different resource. */
 const OTHER_ORIGIN = "http://127.0.0.1:3000";
-const REDIRECT_URI = "https://chatgpt.example/connector/oauth_callback";
+const REDIRECT_URI = "https://client.example/oauth/callback";
 const SECRET = "connector-mcp-test-secret-at-least-32-characters";
 const WORKING_DIRECTORY = "/srv/work/project";
 const ALL_SCOPES = "paseo:read paseo:run paseo:cancel offline_access";
 
-const ErrorContent = z.object({
-  error: z.object({
-    code: z.string(),
-    message: z.string(),
-    operationId: z.string().optional(),
-    agentId: z.string().optional(),
-    state: z.string().optional(),
-  }),
-});
-const OperationContent = z.object({
-  operationId: z.string(),
-  state: z.string(),
-  agentId: z.string().nullable(),
-});
 const CursorContent = z.object({ epoch: z.string(), seq: z.number() });
 const AgentContent = z.object({
   type: z.literal("agent"),
@@ -70,158 +58,8 @@ const AgentContent = z.object({
     staleCursor: z.boolean(),
   }),
 });
-const AgentsContent = z.object({ agents: z.array(z.object({ agentId: z.string() })) });
-const TextContent = z.array(z.object({ type: z.literal("text"), text: z.string() })).min(1);
 
-interface FakeAgent {
-  snapshot: AgentSnapshot;
-  epoch: string;
-  entries: AgentTimelineEntry[];
-}
-
-/**
- * The daemon side, as the daemon behaves: keyed creation, message receipts per (agent, messageId),
- * "Agent not found" for unknown ids, interrupt keeps the session, and epoch/sequence paging that
- * answers a stale cursor with a reset tail page. Records every call so tests can prove what never
- * reached the machine.
- */
-class FakeDaemon implements AgentConnection {
-  readonly calls: { method: string; agentId?: string }[] = [];
-  readonly agents = new Map<string, FakeAgent>();
-  beforeSend: (() => Promise<void>) | undefined;
-  private readonly creations = new Map<string, string>();
-  private readonly receipts = new Set<string>();
-
-  seed(agentId: string): void {
-    this.agents.set(agentId, {
-      snapshot: { id: agentId, workspaceId: `workspace-${agentId}`, status: "idle" },
-      epoch: "epoch-1",
-      entries: [],
-    });
-  }
-
-  append(agentId: string, item: { type: string } & Record<string, unknown>): void {
-    const agent = this.require(agentId);
-    const seq = agent.entries.length + 1;
-    agent.entries.push({
-      provider: "claude",
-      item,
-      timestamp: new Date(Date.UTC(2026, 8, 30, 12, 0, seq)).toISOString(),
-      seqStart: seq,
-      seqEnd: seq,
-      sourceSeqRanges: [{ startSeq: seq, endSeq: seq }],
-    });
-  }
-
-  /** The daemon rewrote the timeline: earlier cursors are stale. */
-  rewrite(agentId: string): void {
-    this.require(agentId).epoch = "epoch-2";
-  }
-
-  async create(key: string, _options: DaemonCreateAgentOptions): Promise<AgentSnapshot> {
-    this.calls.push({ method: "create" });
-    const prior = this.creations.get(key);
-    const agentId = prior ?? `agent-${randomUUID()}`;
-    if (prior === undefined) {
-      this.seed(agentId);
-      this.creations.set(key, agentId);
-    }
-    return { ...this.require(agentId).snapshot };
-  }
-
-  async get(agentId: string): Promise<AgentSnapshot> {
-    this.calls.push({ method: "get", agentId });
-    return { ...this.require(agentId).snapshot };
-  }
-
-  async send(agentId: string, messageId: string, text: string): Promise<void> {
-    this.calls.push({ method: "send", agentId });
-    await this.beforeSend?.();
-    const agent = this.require(agentId);
-    if (this.receipts.has(`${agentId}:${messageId}`)) return;
-    this.receipts.add(`${agentId}:${messageId}`);
-    agent.snapshot.status = "running";
-    this.append(agentId, { type: "user_message", text });
-  }
-
-  async restore(): Promise<boolean> {
-    throw new Error("the connector never restores workspaces");
-  }
-
-  async control(agentId: string, _workspaceId: string, action: "interrupt" | "archive") {
-    this.calls.push({ method: `control:${action}`, agentId });
-    this.require(agentId).snapshot.status = "idle";
-  }
-
-  async watch(): Promise<() => void> {
-    throw new Error("the connector never watches agents");
-  }
-
-  async timeline(
-    agentId: string,
-    input: { cursor?: AgentTimelineCursor; direction: "tail" | "before" | "after"; limit: number },
-  ): Promise<AgentTimelinePage> {
-    this.calls.push({ method: "timeline", agentId });
-    const agent = this.require(agentId);
-    const stale = input.cursor !== undefined && input.cursor.epoch !== agent.epoch;
-    const direction = stale ? "tail" : input.direction;
-    const seq = input.cursor?.seq ?? 0;
-    const all = agent.entries;
-    let page = all.slice(-input.limit);
-    if (direction === "after")
-      page = all.filter((entry) => entry.seqStart > seq).slice(0, input.limit);
-    if (direction === "before")
-      page = all.filter((entry) => entry.seqEnd < seq).slice(-input.limit);
-    const first = page[0];
-    const last = page.at(-1);
-    return {
-      agent: { ...agent.snapshot },
-      epoch: agent.epoch,
-      reset: stale,
-      staleCursor: stale,
-      gap: false,
-      startCursor: first === undefined ? null : { epoch: agent.epoch, seq: first.seqStart },
-      endCursor: last === undefined ? null : { epoch: agent.epoch, seq: last.seqEnd },
-      hasOlder: first !== undefined && first.seqStart > 1,
-      hasNewer: last !== undefined && last.seqEnd < all.length,
-      entries: page,
-    };
-  }
-
-  private require(agentId: string): FakeAgent {
-    const agent = this.agents.get(agentId);
-    if (agent === undefined) throw new DaemonAgentError(`Agent not found: ${agentId}`);
-    return agent;
-  }
-}
-
-function daemonConnection(daemon: FakeDaemon): DaemonConnection {
-  return {
-    agents: daemon,
-    async getProviderSnapshot({ cwd }) {
-      return {
-        requestId: randomUUID(),
-        ...(cwd === undefined ? {} : { cwd }),
-        entries: [
-          {
-            provider: "claude",
-            status: "ready",
-            enabled: true,
-            label: "Claude",
-            models: [{ provider: "claude", id: "opus", label: "Opus", isDefault: true }],
-            modes: [{ id: "default", label: "Default" }],
-            defaultModeId: "default",
-          },
-        ],
-        generatedAt: new Date().toISOString(),
-      };
-    },
-    refreshProviderSnapshot: () => Promise.reject(new Error("not used")),
-    validateAgentConfiguration: () => Promise.reject(new Error("not used")),
-  };
-}
-
-describe("Paseo connector MCP endpoint", () => {
+describe("Paseo Agent Connector MCP endpoint", () => {
   let root: string;
   let bundle: DatabaseRuntimeBundle;
   let database: Database;
@@ -292,35 +130,11 @@ describe("Paseo connector MCP endpoint", () => {
     const browser = new Browser(auth, ORIGIN);
     await browser.signUp();
     const organizationId = await browser.createOrganization();
-    const daemonId = await enroll(organizationId);
+    const daemonId = await enrollConnectorDaemon(database, organizationId);
     const daemon = new FakeDaemon();
     online.set(daemonId, daemonConnection(daemon));
     const { tokens, connectionId } = await linkAndExchange(auth, browser, daemonId, scope);
     return { browser, daemonId, daemon, token: tokens.access_token, connectionId };
-  }
-
-  async function enroll(organizationId: string): Promise<string> {
-    const verifier = `token-${randomUUID()}`;
-    await database.issueEnrollmentToken({
-      id: randomUUID(),
-      verifier,
-      organizationId,
-      expiresAt: new Date(Date.now() + 60_000),
-      consumedAt: null,
-    });
-    const daemonId = randomUUID();
-    await database.enrollDaemon({
-      daemonId,
-      idempotencyKey: randomUUID(),
-      suggestedSlug: `devbox-${daemonId.slice(0, 8)}`,
-      tokenVerifier: verifier,
-      serverId: randomUUID(),
-      daemonPublicKey: "public",
-      credentialVerifier: "credential",
-      permissions: ["hub.execute"],
-      now: new Date(),
-    });
-    return daemonId;
   }
 
   /** Dynamic registration, authorization, machine selection, consent and a PKCE code exchange. */
@@ -337,7 +151,7 @@ describe("Paseo connector MCP endpoint", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          client_name: "Dotty",
+          client_name: "Example MCP Client",
           redirect_uris: [REDIRECT_URI],
           token_endpoint_auth_method: "none",
           grant_types: ["authorization_code", "refresh_token"],
@@ -392,34 +206,7 @@ describe("Paseo connector MCP endpoint", () => {
     return { tokens, connectionId: connections[0]!.connectionId };
   }
 
-  async function mcp(token: string): Promise<Client> {
-    const client = new Client({ name: "dotty-test", version: "1.0.0" });
-    const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
-      requestInit: { headers: { authorization: `Bearer ${token}` } },
-    });
-    // The SDK's getter is typed `string | undefined` while its Transport interface uses an
-    // exact-optional `sessionId?: string`; the runtime class is the SDK's official transport.
-    // @ts-expect-error upstream SDK exactOptionalPropertyTypes mismatch
-    await client.connect(transport);
-    return client;
-  }
-
-  async function call(client: Client, name: string, args: Record<string, unknown> = {}) {
-    const result = await client.callTool({ name, arguments: args });
-    return {
-      isError: result.isError === true,
-      structured: result.structuredContent,
-      text: TextContent.parse(result.content)
-        .map((part) => part.text)
-        .join("\n"),
-    };
-  }
-
-  async function toolError(client: Client, name: string, args: Record<string, unknown> = {}) {
-    const result = await call(client, name, args);
-    expect(result.isError).toBe(true);
-    return { ...ErrorContent.parse(result.structured).error, text: result.text };
-  }
+  const mcp = (token: string) => connectMcp(endpoint, token);
 
   /** What an MCP client sends first, without the SDK, to read the HTTP-level answer. */
   function initialize(authorization?: string): Promise<Response> {
@@ -540,14 +327,14 @@ describe("Paseo connector MCP endpoint", () => {
     const { token, daemon } = await linkedAccount("paseo:read");
     const client = await mcp(token);
     try {
-      const connection = await call(client, "get_connection");
+      const connection = await callTool(client, "get_connection");
       expect(connection.structured).toMatchObject({
         machine: { online: true },
         workingDirectory: WORKING_DIRECTORY,
         scopes: ["paseo:read"],
       });
       expect(connection.text).toContain(WORKING_DIRECTORY);
-      expect((await call(client, "list_agents")).structured).toEqual({ agents: [] });
+      expect((await callTool(client, "list_agents")).structured).toEqual({ agents: [] });
 
       const refused = await toolError(client, "start_agent", launch());
       expect(refused.code).toBe("insufficient_scope");
@@ -562,9 +349,9 @@ describe("Paseo connector MCP endpoint", () => {
     const { token, daemon } = await linkedAccount();
     const client = await mcp(token);
     try {
-      expect((await call(client, "list_runtimes")).text).toContain("claude (Claude): ready");
+      expect((await callTool(client, "list_runtimes")).text).toContain("claude (Claude): ready");
 
-      const started = await call(client, "start_agent", launch("Make the suite green"));
+      const started = await callTool(client, "start_agent", launch("Make the suite green"));
       expect(started.isError).toBe(false);
       const operation = OperationContent.parse(started.structured);
       expect(operation.state).toBe("accepted");
@@ -572,7 +359,7 @@ describe("Paseo connector MCP endpoint", () => {
       daemon.append(agentId, { type: "tool_call", name: "Bash", status: "completed" });
       daemon.append(agentId, { type: "assistant_message", text: "All 42 tests pass now." });
 
-      const tail = await call(client, "get_agent", { agent_id: agentId });
+      const tail = await callTool(client, "get_agent", { agent_id: agentId });
       const page = AgentContent.parse(tail.structured);
       expect(page.timeline.entries.map((entry) => entry.text ?? entry.type)).toEqual([
         "Make the suite green",
@@ -584,13 +371,13 @@ describe("Paseo connector MCP endpoint", () => {
 
       // A page boundary: the newest two, then the older one through the returned cursor.
       const newest = AgentContent.parse(
-        (await call(client, "get_agent", { agent_id: agentId, limit: 2 })).structured,
+        (await callTool(client, "get_agent", { agent_id: agentId, limit: 2 })).structured,
       );
       expect(newest.timeline.entries.map((entry) => entry.seqStart)).toEqual([2, 3]);
       expect(newest.timeline.hasOlder).toBe(true);
       const older = AgentContent.parse(
         (
-          await call(client, "get_agent", {
+          await callTool(client, "get_agent", {
             agent_id: agentId,
             cursor: newest.timeline.startCursor,
             direction: "before",
@@ -601,7 +388,7 @@ describe("Paseo connector MCP endpoint", () => {
 
       // The daemon rewrites the timeline: the old cursor yields a reset tail page, said aloud.
       daemon.rewrite(agentId);
-      const reset = await call(client, "get_agent", {
+      const reset = await callTool(client, "get_agent", {
         agent_id: agentId,
         cursor: page.timeline.endCursor,
       });
@@ -612,7 +399,7 @@ describe("Paseo connector MCP endpoint", () => {
       });
       expect(reset.text).toContain("discard earlier cursors");
 
-      const followUp = await call(client, "send_agent_message", {
+      const followUp = await callTool(client, "send_agent_message", {
         request_key: randomUUID(),
         agent_id: agentId,
         text: "Now update the changelog",
@@ -622,14 +409,14 @@ describe("Paseo connector MCP endpoint", () => {
         agentId,
       });
 
-      const cancelled = await call(client, "cancel_agent", { agent_id: agentId });
+      const cancelled = await callTool(client, "cancel_agent", { agent_id: agentId });
       expect(cancelled.structured).toEqual({ agentId, cancelRequested: true });
       expect(daemon.calls.filter((entry) => entry.method.startsWith("control"))).toEqual([
         { method: "control:interrupt", agentId },
       ]);
-      expect(AgentsContent.parse((await call(client, "list_agents")).structured).agents).toEqual([
-        expect.objectContaining({ agentId }),
-      ]);
+      expect(
+        AgentsContent.parse((await callTool(client, "list_agents")).structured).agents,
+      ).toEqual([expect.objectContaining({ agentId })]);
     } finally {
       await client.close();
     }
@@ -649,7 +436,7 @@ describe("Paseo connector MCP endpoint", () => {
       expect(
         (await toolError(client, "cancel_agent", { agent_id: "someone-elses-agent" })).code,
       ).toBe("not_found");
-      const listed = await call(client, "list_agents");
+      const listed = await callTool(client, "list_agents");
       expect(listed.structured).toEqual({ agents: [] });
       expect(daemon.calls.filter((entry) => entry.agentId === "someone-elses-agent")).toEqual([]);
     } finally {
@@ -662,12 +449,12 @@ describe("Paseo connector MCP endpoint", () => {
     const client = await mcp(token);
     try {
       const agentId = OperationContent.parse(
-        (await call(client, "start_agent", launch())).structured,
+        (await callTool(client, "start_agent", launch())).structured,
       ).agentId!;
       const calls = daemon.calls.length;
       online.delete(daemonId);
 
-      expect((await call(client, "get_connection")).structured).toMatchObject({
+      expect((await callTool(client, "get_connection")).structured).toMatchObject({
         machine: { online: false },
       });
       expect((await toolError(client, "get_agent", { agent_id: agentId })).code).toBe(
@@ -720,7 +507,7 @@ describe("Paseo connector MCP endpoint", () => {
         expect([...daemon.agents.values()][0]?.snapshot.status).toBe("running");
       });
 
-      const listed = AgentsContent.parse((await call(client, "list_agents")).structured);
+      const listed = AgentsContent.parse((await callTool(client, "list_agents")).structured);
       expect(listed.agents).toHaveLength(1);
       expect(daemon.calls.map((entry) => entry.method)).not.toContain("control:interrupt");
       expect(daemon.calls.map((entry) => entry.method)).not.toContain("control:archive");
@@ -735,79 +522,4 @@ interface RouteHandlers {
   POST(context: { request: Request }): Response | Promise<Response>;
   GET(): Response | Promise<Response>;
   DELETE(): Response | Promise<Response>;
-}
-
-class Browser {
-  private cookie = "";
-
-  constructor(
-    private readonly auth: AuthServer,
-    private readonly origin: string,
-    readonly email = `operator-${randomUUID()}@example.com`,
-  ) {}
-
-  async signUp(): Promise<void> {
-    const response = await this.auth.handle(
-      this.post("/api/auth/sign-up/email", {
-        name: "Operator",
-        email: this.email,
-        password: "account-password",
-      }),
-    );
-    expect(response.status).toBe(200);
-    this.rememberCookie(response);
-  }
-
-  async signIn(): Promise<void> {
-    const response = await this.auth.handle(
-      this.post("/api/auth/sign-in/email", { email: this.email, password: "account-password" }),
-    );
-    expect(response.status).toBe(200);
-    this.rememberCookie(response);
-  }
-
-  async createOrganization(): Promise<string> {
-    const response = await this.auth.browserAccount!(
-      this.post("/api/auth/paseo/create-organization", { name: "Acme" }),
-    );
-    expect(response.status).toBe(201);
-    return z.object({ organizationId: z.string() }).parse(await response.json()).organizationId;
-  }
-
-  get(path: string): Promise<Response> {
-    return this.auth.handle(
-      new Request(`${this.origin}${path}`, { headers: { cookie: this.cookie } }),
-    );
-  }
-
-  /** The headers a same-origin Hub server function call carries. */
-  headers(): Headers {
-    return new Headers({ cookie: this.cookie, origin: this.origin });
-  }
-
-  private rememberCookie(response: Response): void {
-    this.cookie = response.headers
-      .getSetCookie()
-      .map((value) => value.split(";", 1)[0])
-      .join("; ");
-  }
-
-  private post(path: string, body: unknown): Request {
-    return new Request(`${this.origin}${path}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        origin: this.origin,
-        "sec-fetch-site": "same-origin",
-        ...(this.cookie.length === 0 ? {} : { cookie: this.cookie }),
-      },
-      body: JSON.stringify(body),
-    });
-  }
-}
-
-function jwtClaims(token: string): Record<string, unknown> {
-  return z
-    .record(z.string(), z.unknown())
-    .parse(JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")));
 }
