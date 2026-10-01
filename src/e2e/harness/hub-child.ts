@@ -248,6 +248,7 @@ async function main(): Promise<void> {
     operatorConsole: null,
     providerApplications: null,
     testTriggerRoutes: true,
+    paseoConnector: { status: "disabled" },
     auth: (request) => auth.handle(request),
     browserAccount: (request) => auth.browserAccount!(request),
     signInEmail: (data, headers) => auth.signInEmail!(data, headers),

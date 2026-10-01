@@ -39,6 +39,25 @@ import { InstanceAppOnboarding } from "../instance-setup/app-onboarding.js";
 import { TRUSTED_REQUEST_ORIGIN_HEADER } from "../http/request-origin.js";
 import type { InvitationMailer } from "../invitations/index.js";
 import type { AccountMailer } from "./account-emails.js";
+import { oauthProviderAuthServerMetadata } from "@better-auth/oauth-provider";
+import { createDatabase } from "../db/pg.js";
+import {
+  connectorOAuthEndpoints,
+  connectorOAuthPlugins,
+  protectedResourceMetadata,
+  verifyConnectorAccessToken,
+} from "../paseo-connector/oauth.js";
+import {
+  ConnectorFlowError,
+  decideConnectorConsent,
+  listConnectorConnections,
+  listConnectorMachines,
+  listMemberDaemons,
+  revokeConnectorConnection,
+  selectConnectorMachine,
+  type ConnectorFlowContext,
+  type ConnectorOAuthService,
+} from "../paseo-connector/flow.js";
 
 export interface AuthServer {
   handle(request: Request): Promise<Response>;
@@ -71,6 +90,8 @@ export interface AuthServer {
   apiKeys?: OrganizationApiKeys;
   cliCredentials?: OrganizationCliCredentials;
   publicCredentials?: PublicCredentialAuthenticator;
+  /** The Paseo connector's OAuth surface; absent unless the public origin is HTTPS or loopback. */
+  connector?: ConnectorOAuthService;
   close(): Promise<void>;
 }
 
@@ -125,6 +146,18 @@ const RAW_PRODUCT_PATHS = new Set([
   "/api/auth/verify-email",
 ]);
 
+/**
+ * The OAuth provider endpoints an OAuth client reaches directly, when the connector is enabled.
+ * Continue and consent stay closed: only the flow-aware connector functions drive them.
+ */
+const CONNECTOR_OAUTH_PATHS = new Map([
+  ["/api/auth/oauth2/authorize", "GET"],
+  ["/api/auth/oauth2/token", "POST"],
+  ["/api/auth/oauth2/register", "POST"],
+  ["/api/auth/oauth2/revoke", "POST"],
+  ["/api/auth/jwks", "GET"],
+]);
+
 export function createAuthServer(options: AuthServerOptions): AuthServer {
   const database = options.database.drizzle();
   const policy = options.policy ?? defaultInstanceAuthPolicy();
@@ -149,7 +182,15 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     organization: schema.organizations,
     member: schema.members,
     invitation: schema.invitations,
+    oauthClient: schema.oauthClients,
+    oauthRefreshToken: schema.oauthRefreshTokens,
+    oauthAccessToken: schema.oauthAccessTokens,
+    oauthConsent: schema.oauthConsents,
+    jwks: schema.jwks,
   };
+  const connectorEndpoints = connectorOAuthEndpoints(options.baseURL);
+  const connectorDatabase =
+    connectorEndpoints === undefined ? undefined : createDatabase(options.database, options.locks);
   const auth = betterAuth({
     baseURL: options.baseURL,
     secret: options.secret,
@@ -200,7 +241,13 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
         },
       },
     },
-    plugins: [paseoOrganizationPlugin(), tanstackStartCookies()],
+    plugins: [
+      paseoOrganizationPlugin(),
+      ...(connectorEndpoints === undefined || connectorDatabase === undefined
+        ? []
+        : connectorOAuthPlugins(connectorEndpoints, connectorDatabase)),
+      tanstackStartCookies(),
+    ],
   });
   const sessions = {
     async read(headers: Headers): Promise<AccountSession | undefined> {
@@ -238,10 +285,14 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
       : { invitationMailer: options.invitationMailer }),
   });
   const browserOrigin = new URL(options.baseURL).origin;
+  const connector = connectorService();
 
   return {
     handle(request) {
       const path = new URL(request.url).pathname;
+      if (connector !== undefined && CONNECTOR_OAUTH_PATHS.has(path)) {
+        return connectorOAuthRequest(request, path);
+      }
       if (path.startsWith("/api/auth/paseo/")) {
         const rejected = rejectCrossOriginCookieMutation(
           request,
@@ -368,8 +419,102 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     apiKeys,
     cliCredentials,
     publicCredentials,
+    ...(connector === undefined ? {} : { connector }),
     close: () => Promise.resolve(),
   };
+
+  function connectorService(): ConnectorOAuthService | undefined {
+    if (connectorEndpoints === undefined || connectorDatabase === undefined) return undefined;
+    const endpoints = connectorEndpoints;
+    const store = connectorDatabase;
+    const authorizationServerMetadata = oauthProviderAuthServerMetadata(auth);
+    const flow = async (headers: Headers): Promise<ConnectorFlowContext> => {
+      const session = await sessions.read(headers);
+      if (session === undefined) throw new ConnectorFlowError("unauthenticated");
+      return {
+        database: store,
+        account: { userId: session.userId, sessionId: session.sessionId },
+        listMemberDaemons: (userId) => listMemberDaemons(options.database, userId),
+        authorize: (path, body) => authorizeAsBrowser(path, body, headers),
+        now: () => new Date(),
+      };
+    };
+    const mutation = async (headers: Headers): Promise<ConnectorFlowContext> => {
+      requireBrowserOrigin(headers, headersBrowserOrigin(headers, browserOrigin));
+      return flow(headers);
+    };
+    return {
+      endpoints,
+      authorizationServerMetadata,
+      protectedResourceMetadata: () => Response.json(protectedResourceMetadata(endpoints)),
+      verifyAccessToken: (token) =>
+        verifyConnectorAccessToken(token, endpoints, () => auth.api.getJwks()),
+      listMachines: async (headers) => listConnectorMachines(await flow(headers)),
+      selectMachine: async (input, headers) =>
+        selectConnectorMachine(await mutation(headers), input),
+      decideConsent: async (input, headers) =>
+        decideConnectorConsent(await mutation(headers), input),
+      listConnections: async (headers) => listConnectorConnections(await flow(headers)),
+      revokeConnection: async (input, headers) =>
+        revokeConnectorConnection(await mutation(headers), input),
+    };
+  }
+
+  /** Drives the library's continue/consent endpoint as the signed-in browser, cookie and all. */
+  async function authorizeAsBrowser(
+    path: "continue" | "consent",
+    body: Record<string, unknown>,
+    browserHeaders: Headers,
+  ): Promise<string> {
+    const response = await auth.handler(
+      new Request(new URL(`/api/auth/oauth2/${path}`, options.baseURL), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          origin: browserOrigin,
+          cookie: browserHeaders.get("cookie") ?? "",
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+    const result = z
+      .object({ url: z.string().min(1), error: z.string().optional() })
+      .partial()
+      .safeParse(await response.json().catch(() => undefined));
+    if (!response.ok || !result.success || result.data.url === undefined) {
+      const reason = result.success ? (result.data.error ?? "") : "";
+      throw new ConnectorFlowError(
+        "authorization_failed",
+        `oauth2/${path} returned HTTP ${response.status} ${reason}`.trim(),
+      );
+    }
+    return result.data.url;
+  }
+
+  async function connectorOAuthRequest(request: Request, path: string): Promise<Response> {
+    if (request.method !== CONNECTOR_OAUTH_PATHS.get(path)) {
+      return Response.json({ error: "not_found" }, { status: 404 });
+    }
+    if (request.method === "GET") return auth.handler(request);
+    // Token, registration and revocation are OAuth client calls. Whatever cookie a browser
+    // attaches, they are never cookie-authenticated.
+    const headers = new Headers(request.headers);
+    headers.delete("cookie");
+    const body = await request.text();
+    if (path === "/api/auth/oauth2/token") {
+      const resources = new URLSearchParams(body).getAll("resource");
+      // Without this resource the library would mint an opaque token outside the connector's
+      // claim checks; every token Hub issues is a connector JWT for exactly this resource.
+      if (resources.length !== 1 || resources[0] !== connectorEndpoints?.resource) {
+        return Response.json(
+          { error: "invalid_target", error_description: "resource must be the Paseo connector" },
+          { status: 400, headers: { "cache-control": "no-store" } },
+        );
+      }
+    }
+    return auth.handler(new Request(request.url, { method: "POST", headers, body }));
+  }
 
   async function changePassword(request: Request): Promise<Response> {
     const session = await sessions.read(request.headers);

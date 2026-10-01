@@ -25,6 +25,7 @@ import { Route as ShellOperatorRouteImport } from './routes/_shell/operator'
 import { Route as ShellConnectionsRouteImport } from './routes/_shell/connections'
 import { Route as ShellCliLoginRouteImport } from './routes/_shell/cli-login'
 import { Route as ShellAppsRouteImport } from './routes/_shell/apps'
+import { Route as DotwellKnownOauthAuthorizationServerRouteImport } from './routes/[.]well-known/oauth-authorization-server'
 import { Route as ApiV1CliAuthorizationsRouteImport } from './routes/api/v1/cli-authorizations'
 import { Route as ApiV1SplatRouteImport } from './routes/api/v1/$'
 import { Route as ApiDaemonsEnrollRouteImport } from './routes/api/daemons/enroll'
@@ -49,6 +50,7 @@ import { Route as ShellOOrganizationSlugHomeRouteImport } from './routes/_shell/
 import { Route as ShellOOrganizationSlugDaemonsRouteImport } from './routes/_shell/o/$organizationSlug/daemons'
 import { Route as ShellOOrganizationSlugConnectionsRouteImport } from './routes/_shell/o/$organizationSlug/connections'
 import { Route as ShellOOrganizationSlugActivityRouteImport } from './routes/_shell/o/$organizationSlug/activity'
+import { Route as DotwellKnownOauthProtectedResourceMcpPaseoRouteImport } from './routes/[.]well-known/oauth-protected-resource/mcp/paseo'
 import { Route as ShellOOrganizationSlugTriggersIndexRouteImport } from './routes/_shell/o/$organizationSlug/triggers/index'
 import { Route as ShellOOrganizationSlugSettingsIndexRouteImport } from './routes/_shell/o/$organizationSlug/settings/index'
 import { Route as ShellOOrganizationSlugTriggersTriggerIdRouteImport } from './routes/_shell/o/$organizationSlug/triggers/$triggerId'
@@ -136,6 +138,12 @@ const ShellAppsRoute = ShellAppsRouteImport.update({
   path: '/apps',
   getParentRoute: () => ShellRoute,
 } as any)
+const DotwellKnownOauthAuthorizationServerRoute =
+  DotwellKnownOauthAuthorizationServerRouteImport.update({
+    id: '/.well-known/oauth-authorization-server',
+    path: '/.well-known/oauth-authorization-server',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiV1CliAuthorizationsRoute = ApiV1CliAuthorizationsRouteImport.update({
   id: '/api/v1/cli-authorizations',
   path: '/api/v1/cli-authorizations',
@@ -273,6 +281,12 @@ const ShellOOrganizationSlugActivityRoute =
     path: '/o/$organizationSlug/activity',
     getParentRoute: () => ShellRoute,
   } as any)
+const DotwellKnownOauthProtectedResourceMcpPaseoRoute =
+  DotwellKnownOauthProtectedResourceMcpPaseoRouteImport.update({
+    id: '/.well-known/oauth-protected-resource/mcp/paseo',
+    path: '/.well-known/oauth-protected-resource/mcp/paseo',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ShellOOrganizationSlugTriggersIndexRoute =
   ShellOOrganizationSlugTriggersIndexRouteImport.update({
     id: '/',
@@ -320,6 +334,7 @@ export interface FileRoutesByFullPath {
   '/': typeof ShellIndexRoute
   '/health': typeof HealthRoute
   '/webhook': typeof WebhookRoute
+  '/.well-known/oauth-authorization-server': typeof DotwellKnownOauthAuthorizationServerRoute
   '/apps': typeof ShellAppsRoute
   '/cli-login': typeof ShellCliLoginRoute
   '/connections': typeof ShellConnectionsRoute
@@ -341,6 +356,7 @@ export interface FileRoutesByFullPath {
   '/api/daemons/enroll': typeof ApiDaemonsEnrollRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/api/v1/cli-authorizations': typeof ApiV1CliAuthorizationsRouteWithChildren
+  '/.well-known/oauth-protected-resource/mcp/paseo': typeof DotwellKnownOauthProtectedResourceMcpPaseoRoute
   '/o/$organizationSlug/activity': typeof ShellOOrganizationSlugActivityRoute
   '/o/$organizationSlug/connections': typeof ShellOOrganizationSlugConnectionsRoute
   '/o/$organizationSlug/daemons': typeof ShellOOrganizationSlugDaemonsRoute
@@ -367,6 +383,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/health': typeof HealthRoute
   '/webhook': typeof WebhookRoute
+  '/.well-known/oauth-authorization-server': typeof DotwellKnownOauthAuthorizationServerRoute
   '/apps': typeof ShellAppsRoute
   '/cli-login': typeof ShellCliLoginRoute
   '/connections': typeof ShellConnectionsRoute
@@ -389,6 +406,7 @@ export interface FileRoutesByTo {
   '/api/daemons/enroll': typeof ApiDaemonsEnrollRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/api/v1/cli-authorizations': typeof ApiV1CliAuthorizationsRouteWithChildren
+  '/.well-known/oauth-protected-resource/mcp/paseo': typeof DotwellKnownOauthProtectedResourceMcpPaseoRoute
   '/o/$organizationSlug/activity': typeof ShellOOrganizationSlugActivityRoute
   '/o/$organizationSlug/connections': typeof ShellOOrganizationSlugConnectionsRoute
   '/o/$organizationSlug/daemons': typeof ShellOOrganizationSlugDaemonsRoute
@@ -415,6 +433,7 @@ export interface FileRoutesById {
   '/_shell': typeof ShellRouteWithChildren
   '/health': typeof HealthRoute
   '/webhook': typeof WebhookRoute
+  '/.well-known/oauth-authorization-server': typeof DotwellKnownOauthAuthorizationServerRoute
   '/_shell/apps': typeof ShellAppsRoute
   '/_shell/cli-login': typeof ShellCliLoginRoute
   '/_shell/connections': typeof ShellConnectionsRoute
@@ -437,6 +456,7 @@ export interface FileRoutesById {
   '/api/daemons/enroll': typeof ApiDaemonsEnrollRoute
   '/api/v1/$': typeof ApiV1SplatRoute
   '/api/v1/cli-authorizations': typeof ApiV1CliAuthorizationsRouteWithChildren
+  '/.well-known/oauth-protected-resource/mcp/paseo': typeof DotwellKnownOauthProtectedResourceMcpPaseoRoute
   '/_shell/o/$organizationSlug/activity': typeof ShellOOrganizationSlugActivityRoute
   '/_shell/o/$organizationSlug/connections': typeof ShellOOrganizationSlugConnectionsRoute
   '/_shell/o/$organizationSlug/daemons': typeof ShellOOrganizationSlugDaemonsRoute
@@ -466,6 +486,7 @@ export interface FileRouteTypes {
     | '/'
     | '/health'
     | '/webhook'
+    | '/.well-known/oauth-authorization-server'
     | '/apps'
     | '/cli-login'
     | '/connections'
@@ -487,6 +508,7 @@ export interface FileRouteTypes {
     | '/api/daemons/enroll'
     | '/api/v1/$'
     | '/api/v1/cli-authorizations'
+    | '/.well-known/oauth-protected-resource/mcp/paseo'
     | '/o/$organizationSlug/activity'
     | '/o/$organizationSlug/connections'
     | '/o/$organizationSlug/daemons'
@@ -513,6 +535,7 @@ export interface FileRouteTypes {
   to:
     | '/health'
     | '/webhook'
+    | '/.well-known/oauth-authorization-server'
     | '/apps'
     | '/cli-login'
     | '/connections'
@@ -535,6 +558,7 @@ export interface FileRouteTypes {
     | '/api/daemons/enroll'
     | '/api/v1/$'
     | '/api/v1/cli-authorizations'
+    | '/.well-known/oauth-protected-resource/mcp/paseo'
     | '/o/$organizationSlug/activity'
     | '/o/$organizationSlug/connections'
     | '/o/$organizationSlug/daemons'
@@ -560,6 +584,7 @@ export interface FileRouteTypes {
     | '/_shell'
     | '/health'
     | '/webhook'
+    | '/.well-known/oauth-authorization-server'
     | '/_shell/apps'
     | '/_shell/cli-login'
     | '/_shell/connections'
@@ -582,6 +607,7 @@ export interface FileRouteTypes {
     | '/api/daemons/enroll'
     | '/api/v1/$'
     | '/api/v1/cli-authorizations'
+    | '/.well-known/oauth-protected-resource/mcp/paseo'
     | '/_shell/o/$organizationSlug/activity'
     | '/_shell/o/$organizationSlug/connections'
     | '/_shell/o/$organizationSlug/daemons'
@@ -610,6 +636,7 @@ export interface RootRouteChildren {
   ShellRoute: typeof ShellRouteWithChildren
   HealthRoute: typeof HealthRoute
   WebhookRoute: typeof WebhookRoute
+  DotwellKnownOauthAuthorizationServerRoute: typeof DotwellKnownOauthAuthorizationServerRoute
   ApiSplatRoute: typeof ApiSplatRoute
   ApiOpenapiDotjsonRoute: typeof ApiOpenapiDotjsonRoute
   ApiReferenceRoute: typeof ApiReferenceRoute
@@ -626,6 +653,7 @@ export interface RootRouteChildren {
   ApiDaemonsEnrollRoute: typeof ApiDaemonsEnrollRoute
   ApiV1SplatRoute: typeof ApiV1SplatRoute
   ApiV1CliAuthorizationsRoute: typeof ApiV1CliAuthorizationsRouteWithChildren
+  DotwellKnownOauthProtectedResourceMcpPaseoRoute: typeof DotwellKnownOauthProtectedResourceMcpPaseoRoute
   AgentExecutionsExecutionIdAttachmentsAttachmentIdRoute: typeof AgentExecutionsExecutionIdAttachmentsAttachmentIdRoute
   ApiIntegrationsDiscordCallbackRoute: typeof ApiIntegrationsDiscordCallbackRoute
   ApiIntegrationsGithubCallbackRoute: typeof ApiIntegrationsGithubCallbackRoute
@@ -749,6 +777,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/apps'
       preLoaderRoute: typeof ShellAppsRouteImport
       parentRoute: typeof ShellRoute
+    }
+    '/.well-known/oauth-authorization-server': {
+      id: '/.well-known/oauth-authorization-server'
+      path: '/.well-known/oauth-authorization-server'
+      fullPath: '/.well-known/oauth-authorization-server'
+      preLoaderRoute: typeof DotwellKnownOauthAuthorizationServerRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/api/v1/cli-authorizations': {
       id: '/api/v1/cli-authorizations'
@@ -918,6 +953,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellOOrganizationSlugActivityRouteImport
       parentRoute: typeof ShellRoute
     }
+    '/.well-known/oauth-protected-resource/mcp/paseo': {
+      id: '/.well-known/oauth-protected-resource/mcp/paseo'
+      path: '/.well-known/oauth-protected-resource/mcp/paseo'
+      fullPath: '/.well-known/oauth-protected-resource/mcp/paseo'
+      preLoaderRoute: typeof DotwellKnownOauthProtectedResourceMcpPaseoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/_shell/o/$organizationSlug/triggers/': {
       id: '/_shell/o/$organizationSlug/triggers/'
       path: '/'
@@ -1068,6 +1110,8 @@ const rootRouteChildren: RootRouteChildren = {
   ShellRoute: ShellRouteWithChildren,
   HealthRoute: HealthRoute,
   WebhookRoute: WebhookRoute,
+  DotwellKnownOauthAuthorizationServerRoute:
+    DotwellKnownOauthAuthorizationServerRoute,
   ApiSplatRoute: ApiSplatRoute,
   ApiOpenapiDotjsonRoute: ApiOpenapiDotjsonRoute,
   ApiReferenceRoute: ApiReferenceRoute,
@@ -1084,6 +1128,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiDaemonsEnrollRoute: ApiDaemonsEnrollRoute,
   ApiV1SplatRoute: ApiV1SplatRoute,
   ApiV1CliAuthorizationsRoute: ApiV1CliAuthorizationsRouteWithChildren,
+  DotwellKnownOauthProtectedResourceMcpPaseoRoute:
+    DotwellKnownOauthProtectedResourceMcpPaseoRoute,
   AgentExecutionsExecutionIdAttachmentsAttachmentIdRoute:
     AgentExecutionsExecutionIdAttachmentsAttachmentIdRoute,
   ApiIntegrationsDiscordCallbackRoute: ApiIntegrationsDiscordCallbackRoute,

@@ -22,6 +22,7 @@ import {
   type ApplicationRuntime,
   type BillingCheckoutInput,
   type BillingOverviewView,
+  type PaseoConnectorAccess,
 } from "./server/runtime.js";
 import { ProjectDashboard } from "./projects/dashboard.js";
 import { CompositionResources } from "./composition-resources.js";
@@ -153,6 +154,7 @@ async function createOwnedApplicationRuntime(
     homeDashboard: homeDashboardFor(options, connections),
     ...entitlementSurfaces(options),
     testTriggerRoutes: options.testTriggerRoutes ?? false,
+    paseoConnector: paseoConnectorFor(options),
     auth: (request) => {
       if (options.database === null) {
         return Promise.resolve(Response.json({ error: "database_unavailable" }, { status: 503 }));
@@ -458,6 +460,12 @@ function requireBilling(options: ApplicationCompositionOptions): {
     throw new Error("billing is not configured");
   }
   return { billing: options.billing, database: options.database };
+}
+
+function paseoConnectorFor(options: ApplicationCompositionOptions): PaseoConnectorAccess {
+  if (options.database === null || options.auth === null) return { status: "database_unavailable" };
+  if (options.auth.connector === undefined) return { status: "disabled" };
+  return { status: "enabled", oauth: options.auth.connector, database: options.database };
 }
 
 function requireAuth(options: ApplicationCompositionOptions): AuthServer {
