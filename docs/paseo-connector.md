@@ -11,10 +11,17 @@ started itself. Other Paseo sessions on the machine never appear in it and canno
 
 ## Requirements
 
-- **A public origin.** Set `PASEO_HUB_APP_URL` to the origin that ChatGPT and your daemons both reach. The
-  connector is enabled only when that origin is `https:`, or plain `http:` on `localhost`, `127.0.0.1` or
-  `[::1]` (for local testing). On any other origin every connector route answers 404. Hub's own sign-in,
-  daemons and triggers keep working.
+- **An explicit opt-in.** Set `PASEO_HUB_PASEO_CONNECTOR=enabled`. The connector is off by default: unset,
+  blank or `disabled` installs no OAuth provider and opens no client registration, and every connector route
+  (the OAuth endpoints, both well-known documents, `/mcp/paseo`, and the linking screens' server functions)
+  answers 404. Any other value stops Hub at startup. Hub's own sign-in, daemons and triggers are unchanged
+  either way.
+- **A public origin.** Set `PASEO_HUB_APP_URL` to the origin that ChatGPT and your daemons both reach. Even
+  when opted in, the connector is enabled only when that origin is `https:`, or plain `http:` on
+  `localhost`, `127.0.0.1` or `[::1]` (for local testing). On any other origin every connector route answers 404.
+- **An owner or admin.** Only a user whose current role in the machine's organization is `owner` or `admin`
+  (the roles that manage the organization's resources) can see machines, select one, approve the link, or
+  use or refresh a connection. A view-only `member` sees no machines.
 - **A database.** Use embedded PGlite (the default, stored in `PASEO_HUB_DATA_DIR`) or `DATABASE_URL`. Without
   one, connector routes answer 503.
 - **A stable `PASEO_HUB_AUTH_SECRET`** (or the generated one kept in the data directory). Hub's token
@@ -39,15 +46,28 @@ With `<origin>` standing for `PASEO_HUB_APP_URL`:
 | Machine and directory selection        | `<origin>/oauth/connect` (reached through the authorization flow) |
 | Your connections and revocation        | `<origin>/oauth/connections`                                      |
 
-A request to `/mcp/paseo` without a valid access token gets `401` with
+A request to `/mcp/paseo` without a bearer token gets `401` with
 `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp/paseo"`. Clients
-use that header to discover the authorization server. A valid token whose connection was revoked or no longer
-exists gets the same header with `error="invalid_token"` added. A token carrying no connector scope gets
-`403` with `error="insufficient_scope"`.
+use that header to discover the authorization server. A bearer token that is malformed, expired, signed by
+someone else or issued for another resource, or whose connection was revoked or no longer exists, gets the
+same header with `error="invalid_token"` added (RFC 6750). A token carrying no connector scope gets `403` with
+`error="insufficient_scope"`. When Hub cannot read its own signing keys or the connection (a database
+outage, say), the answer is `503` `temporarily_unavailable`, never a `401`, so a client does not re-link over
+Hub's own failure.
+
+The authorization-server metadata lists only the endpoints in the table above. The library's introspection
+endpoint is not served and not advertised.
 
 Access tokens are JWTs signed by Hub, with the issuer `<origin>` and the audience `<origin>/mcp/paseo`. They
 last one hour. A token request must name `resource=<origin>/mcp/paseo`; any other resource is refused with
 `invalid_target`. Only public clients using PKCE `S256` are supported.
+
+A refresh-token request is checked against the connection before the refresh token is rotated: the
+connection must be active and not revoked, the user must still be an owner or admin of its organization, the
+machine must still be active with `hub.execute`, and the stored scopes must still be within the connection's.
+If that check fails the answer is `400` `invalid_grant` and the presented refresh token is left untouched. If
+Hub cannot read the grant at all the answer is `503` `temporarily_unavailable`, and the same refresh token
+stays usable for a retry.
 
 ## Scopes
 
@@ -65,18 +85,19 @@ It never returns an empty success.
 ## Linking a machine
 
 1. The client starts authorization. A signed-out user sees Hub's normal sign-in form at `/oauth/connect`.
-2. The user picks an enrolled machine from an organization they belong to. They then type an absolute working
-   directory, such as `/srv/work/project`. Hub never falls back to the daemon's own working directory.
+2. The user picks an enrolled machine from an organization where they are an owner or admin. They then type an
+   absolute working directory, such as `/srv/work/project`. Hub never falls back to the daemon's own working
+   directory.
 3. The consent page shows the client, the machine, the directory and the scopes. Approving it activates the
    connection. Denying it discards the connection.
 
 Every MCP request checks the connection again. It must still be active and not revoked, the user must still
-belong to the organization, and the machine must still be active with `hub.execute`.
+be an owner or admin of the organization, and the machine must still be active with `hub.execute`.
 
 ## Revoking
 
-Revoke a connection at `<origin>/oauth/connections`. Removing the user from the organization has the same
-effect.
+Revoke a connection at `<origin>/oauth/connections`. Removing the user from the organization, or demoting them
+to `member`, has the same effect for as long as they stay removed or demoted.
 
 What revocation does:
 
@@ -131,6 +152,11 @@ each intended operation.
 
 Acceptance means the machine received the text. It does not mean the task is finished.
 
+**Known limitation: no automatic reconciliation.** If Hub stops (a crash or a restart) while a launch is
+between creating the agent and recording the result, the operation stays `creating` or `created`. Hub reports
+that state, with the operation's own IDs, on every later look and on a replay of the same key. It never
+re-creates, re-sends or resolves it by itself. Inspect the agent in Paseo to see what actually happened.
+
 ### Cancellation
 
 `cancel_agent` interrupts the current turn only. The session remains, can receive more messages, and keeps
@@ -162,27 +188,18 @@ appear in it.
 
 ## Registering a private MCP app in ChatGPT
 
-1. Deploy Hub on its HTTPS origin, with `PASEO_HUB_APP_URL` set to that origin. Confirm that
+1. Deploy Hub on its HTTPS origin, with `PASEO_HUB_APP_URL` set to that origin and
+   `PASEO_HUB_PASEO_CONNECTOR=enabled`. Confirm that
    `<origin>/.well-known/oauth-protected-resource/mcp/paseo` returns JSON.
 2. In ChatGPT, open **Add**, then **Create MCP App**.
 3. Set **Server URL** to `<origin>/mcp/paseo` and choose **OAuth** authentication.
 4. Leave the client credentials empty: ChatGPT registers itself as a public client through dynamic client
    registration.
 5. Read the custom-server trust notice, accept it if you trust this Hub, and create the app.
-6. Connect the app. You are sent to Hub: sign in, select the machine and working directory, and approve.
+6. Connect the app. You are sent to Hub: sign in as an owner or admin of the machine's organization, select
+   the machine and working directory, and approve.
 
 Linking the app in ordinary ChatGPT does not show that Dotty can use it. See the status line at the top.
-
-## Local smoke test
-
-```sh
-npm run build
-PASEO_HUB_APP_URL=http://localhost:3000 PORT=3000 PASEO_HUB_DATA_DIR=./.hub-data npm start
-```
-
-Sign up, create an organization and enroll a daemon as usual. Then point the MCP Inspector
-(`npx @modelcontextprotocol/inspector`) at `http://localhost:3000/mcp/paseo` with the Streamable HTTP
-transport, and run its OAuth flow.
 
 ## Local verification
 
@@ -192,12 +209,17 @@ proves the Hub and daemon side only. **Dotty compatibility: not yet verified.**
 Run it with `PASEO_E2E_WORKTREE=<paseo checkout> npm run test:e2e:hub:connector`
 (`src/e2e/hub-paseo-connector.e2e.test.ts`). It needs Docker for PostgreSQL, a current `npm run build`, the
 `claude` CLI, and Playwright's Chromium. The harness starts its own PostgreSQL container, the built self-hosted
-production runtime behind a local reverse proxy (`http://127.0.0.1:<port>`), and a source-built Paseo daemon
-with its own `PASEO_HOME` and listen port, enrolled with `hub.execute`. It never touches another daemon.
+production runtime behind a local reverse proxy (`http://127.0.0.1:<port>`) with
+`PASEO_HUB_PASEO_CONNECTOR=enabled`, and a source-built Paseo daemon with its own `PASEO_HOME` and listen port,
+enrolled with `hub.execute`. It never touches another daemon.
+
+The test operator signs up through Hub's own sign-up endpoint, but their membership in the harness's seeded
+organization (the one the daemon is enrolled in) is inserted directly into the database, as `admin`. Hub's
+invitation flow is not part of this run.
 
 | Item            | Tested                                                                                                                                                 |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Hub             | 0.10.0, branch `feat/dotty-connector` after `66502cc`, PostgreSQL 17                                                                                   |
+| Hub             | 0.10.0, commit `<filled by controller>`, PostgreSQL 17                                                                                                 |
 | Paseo daemon    | 0.10.0, source commit `2c9b09e4a9`                                                                                                                     |
 | Agent provider  | `claude` (Claude Code 2.1.285), model `claude-haiku-4-5` chosen from `list_runtimes`                                                                   |
 | Transport       | MCP Streamable HTTP, stateless JSON responses, `@modelcontextprotocol/sdk` 1.30.0 client                                                               |
@@ -205,8 +227,8 @@ with its own `PASEO_HOME` and listen port, enrolled with `hub.execute`. It never
 
 Every step passed (9 of 9, about 55 s on 2026-09-30):
 
-1. Both well-known documents name the origin and resource. A request without a valid token gets `401` with the
-   `resource_metadata` challenge. `tools/list` returns exactly the seven tools. `get_connection` shows the
+1. Both well-known documents name the origin and resource. A request without a token gets `401` with the
+   `resource_metadata` challenge, and an invalid token gets the same challenge with `error="invalid_token"`. `tools/list` returns exactly the seven tools. `get_connection` shows the
    selected machine online and the selected directory; `list_runtimes` shows `claude` ready.
 2. `start_agent` was accepted. Paseo itself reports the agent as a `claude` agent whose working directory is the
    linked directory.
@@ -219,9 +241,12 @@ Every step passed (9 of 9, about 55 s on 2026-09-30):
    `get_agent`, `send_agent_message` and `cancel_agent` on it all returned `not_found`, and the refused message
    never reached it.
 8. After a Hub restart on the same database, `list_agents` and `get_agent` still resolved the owned agents.
-9. With the daemon's Hub connection cut, `get_connection` reported it offline, `get_agent` and `start_agent`
-   failed with `machine_offline`, and no agent was created. It came back online after reconnecting.
-10. Revoking the connection at `/oauth/connections` while an agent was mid-answer made the next MCP request
-    fail with `401` `error="invalid_token"`. Paseo still reported the agent running, then and three seconds later.
+9. Revoking the connection at `/oauth/connections` while an agent was mid-answer made the next MCP request
+   fail with `401` `error="invalid_token"`. Paseo still reported the agent running, then and three seconds later.
+10. With the daemon's Hub connection cut, `get_connection` reported it offline, `get_agent` and `start_agent`
+    failed with `machine_offline`, and no agent was created. It came back online after reconnecting.
+
+The numbers match the test titles. Steps 2 and 3 are one test, and step 10 runs before step 9, because
+revocation ends the connection the other steps use.
 
 Not covered here: a public HTTPS origin, ChatGPT or Dotty, refresh-token exchange, and re-enrolling a daemon.
