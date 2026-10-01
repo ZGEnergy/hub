@@ -1,8 +1,21 @@
-# Self-hosted Paseo Dotty Connector Implementation Plan
+# Self-hosted Paseo Agent Connector Implementation Plan
+
+> **Revision 2026-10-01.** The product is renamed the **Paseo Agent Connector**, with a provider-neutral
+> contract: any standards-compatible remote MCP client that implements MCP OAuth can link and use it, and no
+> code path depends on the calling client's vendor. "Dotty" is the user's own nickname for one OpenAI Dots
+> client and is the first planned live test, not a requirement. Steps that named Dotty or ChatGPT now name a
+> hosted MCP client, and hosted-client verification is a separate live gate for each client. The dev-tools
+> originals of the specification and this plan (commits `1a461e4f` and `a9f201a1`) remain the historical
+> record, and so do the task commit messages below; this file keeps its original name because the
+> implementation ledger refers to it. Behaviour decided during implementation review is listed in the
+> specification's revision note (owner/admin-only linking, the `PASEO_HUB_PASEO_CONNECTOR` opt-in, resource
+> defaulting and canonical comparison, deny is final, refresh pre-check, Connected apps by client name). The
+> provider-neutral revision added `src/paseo-connector/interoperability.integration.test.ts`: two
+> independently registered clients, HTTPS and loopback redirects, isolation, and caller-chosen runtimes.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a privately connected, OAuth-authenticated Paseo MCP connector that Dotty can use from anywhere to manage only connector-created agents on an enrolled machine.
+**Goal:** Build a privately connected, OAuth-authenticated Paseo MCP connector that any compatible hosted MCP client (for example OpenAI Dots, Claude, Grok) can use from anywhere to manage only connector-created agents on an enrolled machine.
 
 **Architecture:** Extend self-hosted `getpaseo/hub`, reusing its existing login, database, daemon enrollment, and outbound session connection. Add flow-bound account linking, durable connection/agent ownership, a narrow agent service, and a remote MCP endpoint. Neither a CLI wrapper nor the daemon's local MCP endpoint is the connector.
 
@@ -14,14 +27,15 @@
 
 - Extend self-hosted Paseo Hub, rather than depend on changes to hosted Hub.
 - Restrict the connector to agents created through that connector. Existing unrelated Paseo sessions are inaccessible.
-- Reuse the daemon's existing outbound Hub relationship. Do not enroll a parallel Dots Hub.
+- Reuse the daemon's existing outbound Hub relationship. Do not enroll a parallel Hub for the connector.
 - Use an OAuth-authenticated remote MCP interface, not a publicly exposed daemon or CLI wrapper.
 - One OAuth connection is bound to one enrolled daemon and one operator-selected working directory.
 - Every resource call verifies current connection authorization and durable ownership; labels are not authority.
 - Creation and prompting are separate; persist ownership before sending a task.
 - No archive, kill, permission-approval, terminal, browser, schedule, daemon-admin, or unrelated-session tools.
 - Offline machines return explicit errors; no work queue or silent automatic retries.
-- A real Dotty tool invocation is an acceptance gate. Ordinary ChatGPT setup is not proof.
+- A real tool invocation by a hosted client is that client's acceptance gate, recorded per client. Setup UI, or a call from another surface of the same vendor (e.g. ordinary ChatGPT for Dots), is not proof.
+- No client, vendor, domain or callback allowlist; nothing (runtime, provider, model, defaults) derives from the calling client's identity.
 - No passwords, OAuth tokens, daemon credentials, or private conversation contents in docs, tool results, or logs.
 
 ## Source Baseline and Execution Rules
@@ -261,7 +275,7 @@ return page;
 
 **Produces:** `createConnectorOAuth`, signed JWTs carrying an immutable connection reference, `authorizeConnectorRequest`, authorization/resource discovery, and selected-machine consent/revocation UI.
 
-- [ ] Add `@better-auth/oauth-provider@1.6.23` exactly. Do not upgrade all of Better Auth or claim CIMD/private-key-JWT support: those are not in this pin. Use supported public-client dynamic registration with PKCE, or a predefined ChatGPT client if the actual account setup requires it.
+- [ ] Add `@better-auth/oauth-provider@1.6.23` exactly. Do not upgrade all of Better Auth or claim CIMD/private-key-JWT support: those are not in this pin. Use supported public-client dynamic registration with PKCE, which any compatible client can use.
 - [ ] Inspect the **installed pinned plugin schema** and add its five models (`oauthClient`, `oauthRefreshToken`, `oauthAccessToken`, `oauthConsent`, `jwks`) to `src/db/schema.ts` and the existing Drizzle auth-schema map, mapping fields without inventing storage types. A booted client/consent/token round-trip on PGlite and PostgreSQL is the schema contract check; generate migrations through the existing tooling.
 - [ ] Derive exactly one resource and issuer from configured origin. Use `resource = new URL("/mcp/paseo", publicOrigin).href` and `issuer = new URL(publicOrigin).origin`, with HTTPS required outside loopback. Configure the JWT plugin with this explicit issuer. Configure OAuth along these lines:
 
@@ -404,17 +418,17 @@ Document request-key reuse only for the same intended operation. Changed argumen
 - [ ] Render bounded timeline content with cursors instead of dumping unlimited transcripts. Keep final assistant text, errors and approval-required state visible. Do not disclose secrets through connection metadata. Treat tool output as data, not instructions to alter the connector's authority.
 - [ ] Add route handlers through existing application composition and regenerate the route tree. Existing app instances with no database return 503 rather than an in-memory fallback. Leave execution-capability MCP, CLI auth, triggers and daemon enrollment behavior intact.
 - [ ] Add integration tests using the real MCP transport and OAuth-issued token. Verify unauthenticated challenge, wrong audience, read token denied launch, unrelated agent concealment, real owned timeline text, page-boundary/cursor reset, revoked token denied, and explicit offline error. Test consumer behavior, not a copied tool list or source-text inspection.
-- [ ] Update operator docs with public origin/resource/discovery URLs, exact scopes, selected machine/directory consent, token/connection revocation, request-key semantics, cancellation semantics, and how to register this private MCP app from Add -> Create MCP App. Do not state Dot support until Task 6 observes it.
+- [ ] Update operator docs with public origin/resource/discovery URLs, exact scopes, selected machine/directory consent, token/connection revocation, request-key semantics, cancellation semantics, and a generic connect flow for any MCP client, with clearly labelled client-specific examples (e.g. ChatGPT's Add -> Create MCP App). Do not state any hosted client's support until Task 6 observes it for that client.
 
 **Integration-owner verification:** `npx vitest run src/paseo-connector/server.integration.test.ts` plus MCP Inspector against the booted app, exercising actual authorization and representative operations.
 
 **Commit:** `feat: expose the OAuth-linked Paseo MCP connector`.
 
-## Task 6: Integrated Checks, Real Machine, and Dotty Acceptance
+## Task 6: Integrated Checks, Real Machine, and Hosted-Client Acceptance
 
 **Files:** real-agent E2E test and connector operator docs; update Hub self-hosting documentation where it introduces the new endpoint. No permanent fake agent or mock cloud service.
 
-**Consumes:** fully implemented Tasks 1-5, isolated test directory, an operator-authorized live daemon, stable HTTPS Hub origin, and the signed-in Dotty account.
+**Consumes:** fully implemented Tasks 1-5, isolated test directory, an operator-authorized live daemon, stable HTTPS Hub origin, and the signed-in account of each hosted client to be verified (OpenAI Dots first).
 
 **Produces:** recorded real acceptance evidence or an exact platform/deployment blocker. No incomplete connector is described as working.
 
@@ -422,13 +436,13 @@ Document request-key reuse only for the same intended operation. Changed argumen
 - [ ] Boot the actual self-hosted app with persisted data, inspect both well-known endpoints, complete a real OAuth flow, and use MCP Inspector to call the endpoint. Confirm the generated route filenames resolve to the intended public URLs; adjust routing before deployment if TanStack's escaping differs.
 - [ ] Exercise against a real enrolled daemon: list runtimes, launch in the approved test directory, fetch progress/final answer, send a follow-up, then cancel a separate long-running task and verify the session remains. Inspect Paseo itself to confirm the machine/workspace/agent identities. Keep unrelated sessions running and prove the connector cannot list, read, message, or cancel them.
 - [ ] Restart Hub and demonstrate owned session access persists. Disconnect/reconnect the test daemon and observe explicit offline/current-state behavior. Test connector revocation while a task is running: connector calls fail, but the existing task is not silently stopped. Do not revoke/re-enroll the user's production daemon to exercise a fixture.
-- [ ] Use the configured stable public HTTPS origin for private ChatGPT connection. If there is no deployment origin or the chosen machine belongs to another Hub, obtain the operator's decision before DNS/TLS/enrollment changes. Do not expose the daemon port or put credentials in chat. Public directory submission is not required for this private setup.
-- [ ] In the signed-in account, select Add -> Create MCP App, enter the actual endpoint and OAuth, and review the trust acknowledgement with the user before creating/authorizing the app. The earlier browser permission was read-only inspection; it does not authorize installing the connector.
-- [ ] First prove ordinary ChatGPT account linking and tool calls. Then ask **Dotty itself** to use the connector for `get_connection`, `list_runtimes`, and the real launch/results/follow-up/cancel sequence. Record whether the personal custom app is visible and callable by Dotty. Test read/write confirmation without broadening account permissions to force success.
-- [ ] If ordinary ChatGPT succeeds but Dotty cannot see/call the app, report those two results separately and the exact observed limitation. Stop rollout rather than substitute a standard chat, cloud shell, local computer, tunnel, or CLI. Mobile/Slack invocation is only claimed if independently exercised.
+- [ ] Use the configured stable public HTTPS origin for each private hosted-client connection. If there is no deployment origin or the chosen machine belongs to another Hub, obtain the operator's decision before DNS/TLS/enrollment changes. Do not expose the daemon port or put credentials in chat. Public directory submission is not required for this private setup.
+- [ ] For each hosted client, in its signed-in account, add the actual endpoint as a custom MCP server with OAuth (for ChatGPT/Dots: Add -> Create MCP App) and review any trust acknowledgement with the user before creating/authorizing it. The earlier browser permission was read-only inspection; it does not authorize installing the connector.
+- [ ] Per client: prove account linking, then ask **the client itself** (e.g. the Dot, not ordinary ChatGPT) to use the connector for `get_connection`, `list_runtimes`, and the real launch/results/follow-up/cancel sequence. Record whether the custom server is visible and callable. Test read/write confirmation without broadening account permissions to force success.
+- [ ] If linking succeeds but the client cannot see/call the server, or another surface of the same vendor succeeds where the target client fails, report those results separately with the exact observed limitation. Do not substitute a standard chat, cloud shell, local computer, tunnel, or CLI. Mobile/Slack invocation is only claimed if independently exercised.
 - [ ] Record only nonsecret evidence in `docs/paseo-connector.md`: tested Hub/daemon versions, transport, account surface, observed tool results, ownership rejection, persistence, and remaining platform limits. Remove throwaway probes and test workspaces after explicit cancellation/cleanup of the test agents.
 
-**Commit:** `test: verify the real Paseo connector lifecycle and document Dotty compatibility` only after exercised evidence exists.
+**Commit:** `test: verify the real Paseo connector lifecycle and document Dotty compatibility` (historical message) only after exercised evidence exists; hosted-client evidence is recorded per client.
 
 ## Dependency and Review Checkpoints
 
@@ -453,10 +467,11 @@ Task 2 is independent of Task 1 and may run in parallel. Task 3 and Task 4 can r
 | Restart, revocation, re-enrollment identity                               | Tasks 1, 3, 6                                  |
 | Offline and incompatible machines, no queue                               | Tasks 2, 4, 5, 6                               |
 | Read/write annotations and applicable approvals                           | Tasks 3, 5, 6                                  |
-| Actual Dotty compatibility, not ordinary-chat proxy                       | Task 6                                         |
+| Actual hosted-client compatibility, per client, not a proxy surface       | Task 6                                         |
+| Provider neutrality: any compatible client, caller-chosen runtime         | Tasks 3, 5; interoperability tests             |
 | Setup/security/cancellation documentation                                 | Tasks 5, 6                                     |
 
-External gates are an authorized HTTPS deployment and a live Dotty invocation. Neither is proven by this plan. The signed-in UI confirms private MCP creation with OAuth is available, not that the final connector is installed or works.
+External gates are an authorized HTTPS deployment and a live invocation by each hosted client. Neither is proven by this plan. The signed-in OpenAI UI confirms private MCP creation with OAuth is available there, not that the final connector is installed or works in any client.
 
 ## Research References
 
@@ -467,4 +482,5 @@ External gates are an authorized HTTPS deployment and a live Dotty invocation. N
 - OAuth 1.6 documentation: https://better-auth.com/docs/1.6/plugins/oauth-provider
 - Pinned package metadata: https://registry.npmjs.org/@better-auth/oauth-provider/1.6.23
 - ChatGPT connector auth: https://developers.openai.com/plugins/build/auth
+- MCP authorization: https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
 - Self-hosting Hub: https://paseo.sh/docs/hub/self-hosting

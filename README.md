@@ -95,9 +95,9 @@ invitations, signup verification links, and password-reset links through Resend.
 instances require new password accounts to verify their email before sign-in. Without delivery
 configuration, managers retain the existing copy-and-share invitation workflow.
 
-The Paseo connector (an OAuth-linked remote MCP endpoint at `/mcp/paseo`) is off by default. Set
-`PASEO_HUB_PASEO_CONNECTOR=enabled` to turn it on; it also needs an HTTPS `PASEO_HUB_APP_URL`. See
-[docs/paseo-connector.md](docs/paseo-connector.md).
+The Paseo Agent Connector (an OAuth-protected remote MCP server at `/mcp/paseo` for any compatible MCP
+client) is off by default. Set `PASEO_HUB_PASEO_CONNECTOR=enabled` to turn it on; it also needs an HTTPS
+`PASEO_HUB_APP_URL`. See [docs/paseo-connector.md](docs/paseo-connector.md).
 
 Then start Hub and PostgreSQL:
 
