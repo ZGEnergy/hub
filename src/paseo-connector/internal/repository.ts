@@ -291,20 +291,19 @@ export class ConnectorRepository implements ConnectorStore {
     state: OperationState,
     errorCode: string | null,
   ) {
-    // An accepted operation is final. A launch whose owned-agent row exists keeps an agent: it may
-    // be marked accepted, created (e.g. prompt rejected) or outcome_unknown, never creating/failed.
-    // Without that row, "created" is reachable only through bindCreatedAgent.
+    // Forward transitions only: creating → accepted | failed | outcome_unknown, and a created
+    // (bound) launch → accepted | outcome_unknown, or created again to record a rejection reason.
+    // accepted, failed and outcome_unknown are final; "created" is first reached through
+    // bindCreatedAgent, which also records ownership.
     const result = await this.runtime.query(
-      `update connector_operations o set state = $6::text, error_code = $7
+      `update connector_operations o set state = $6::text, error_code = $7::text
        where ${identityMatch("o", 1)} and o.id = $5
-         and (o.state <> 'accepted' or $6::text = 'accepted')
-         and case
-           when exists (
-             select 1 from connector_agents a
-             where ${identityMatch("a", 1)} and a.launch_operation_id = o.id
-           ) then $6::text not in ('creating', 'failed')
-           else $6::text <> 'created'
-         end`,
+         and (
+           (o.state = 'creating' and $6::text in ('accepted', 'failed', 'outcome_unknown'))
+           or (o.state = 'created' and (
+             $6::text in ('accepted', 'outcome_unknown') or ($6::text = 'created' and $7::text is not null)
+           ))
+         )`,
       [...identityParams(identity), operationId, state, errorCode],
     );
     if (result.rowCount > 0) return;

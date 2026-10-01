@@ -14,6 +14,7 @@ import {
   type DaemonCreateAgentOptions,
 } from "../daemons/protocol.js";
 import type { Database } from "../db/types.js";
+import { reportFailure } from "../failures/index.js";
 import type { HubProviderSnapshot } from "../hub/protocol.js";
 import {
   authorizeConnectorRequest,
@@ -100,7 +101,9 @@ export interface AgentStateView {
   requiresAttention: boolean;
   attentionReason: string | null;
   lastError: string | null;
-  /** Approvals waiting on the operator in Paseo; the connector cannot answer them. */
+  /** All approvals waiting on the operator in Paseo; the connector cannot answer them. */
+  pendingPermissionCount: number;
+  /** The first PERMISSION_LIMIT of them, labels capped at LABEL_LIMIT characters. */
   pendingPermissions: PendingPermissionView[];
 }
 
@@ -162,12 +165,18 @@ export interface ConnectorServiceOptions {
   connectionForDaemon(daemonId: string): DaemonConnection | undefined;
   now?: () => Date;
   newId?: () => string;
+  /** Where failures that must not reach the caller go; defaults to Hub's failure reporter. */
+  reportFailure?: (error: unknown, operation: string) => void;
 }
 
 /** Longest single text field returned from a timeline. */
 const TEXT_LIMIT = 8_000;
 /** Live status is fetched for at most this many of the newest owned agents per list. */
 const LIVE_STATUS_LIMIT = 50;
+/** Longest attention reason or permission label returned. */
+const LABEL_LIMIT = 200;
+/** Most pending permissions listed per agent; `pendingPermissionCount` gives the total. */
+const PERMISSION_LIMIT = 20;
 /** ponytail: the registry's provider snapshot has no deadline of its own; 30s here, move it into the registry. */
 const SNAPSHOT_DEADLINE_MS = 30_000;
 const AGENT_NOT_FOUND = /^Agent not found\b/u;
@@ -184,6 +193,25 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
   const store = database.connector;
   const now = options.now ?? (() => new Date());
   const newId = options.newId ?? randomUUID;
+
+  const report =
+    options.reportFailure ??
+    ((error: unknown, operation: string) => {
+      reportFailure(error, { operation, component: "paseo_connector" });
+    });
+
+  /**
+   * The daemon's acceptance is the truth: a failed write of it is reported, not raised, so the
+   * caller keeps the ids instead of retrying with a new key. A replay then reports the operation
+   * unresolved, with its ids, and never resends.
+   */
+  const recordAccepted = async (identity: Identity, operationId: string) => {
+    try {
+      await store.setOperationState(identity, operationId, "accepted", null);
+    } catch (error) {
+      report(error, "paseo_connector.operation.record_accepted");
+    }
+  };
 
   const live = (identity: Identity): DaemonConnection => {
     const connection = options.connectionForDaemon(identity.daemonId);
@@ -243,71 +271,72 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
         model: input.model ?? null,
         mode: input.mode ?? null,
       });
-      return database.withAdvisoryLock(lockKey(identity, input.request_key), async () => {
-        const id = newId();
-        const operation = await store.beginOperation({
-          ...identity,
-          id,
-          kind: "launch",
-          requestKey: input.request_key,
-          requestFingerprint: fingerprint,
-          creationKey: newId(),
-          messageId: newId(),
-          agentId: null,
-          workspaceId: null,
-          state: "creating",
-          errorCode: null,
-        });
-        // ponytail: a launch left "creating" by a crash stays pending; reconcile by re-creating
-        // with its stored creationKey, which the daemon dedupes.
-        if (operation.id !== id) return resultForExistingOperation(operation);
-        const settle = settler(store, identity, operation.id);
-
-        let created: AgentSnapshot;
-        try {
-          created = await daemon.agents.create(operation.creationKey!, {
-            provider: input.provider,
-            title: input.title,
-            cwd: authorized.workingDirectory,
-            env: {},
-            toolPolicy: { preapproved: [] },
-            ...runtime,
-          });
-        } catch (error) {
-          throw await createFailure(error, operation.id, settle);
-        }
-
-        try {
-          await store.bindCreatedAgent(
-            identity,
-            operation.id,
-            created.id,
-            created.workspaceId,
-            now(),
-          );
-        } catch {
-          // Ownership is not durable, so the task is never sent to this agent.
-          await settle("outcome_unknown", "bind_failed");
-          throw new ConnectorError(
-            "outcome_unknown",
-            "the agent was created but could not be recorded; the task was not sent",
-            { operationId: operation.id, state: "outcome_unknown" },
-          );
-        }
-
-        try {
-          await daemon.agents.send(created.id, operation.messageId, input.task);
-        } catch (error) {
-          throw await promptFailure(error, operation, created.id, "created", settle);
-        }
-        await store.setOperationState(identity, operation.id, "accepted", null);
-        return {
-          operationId: operation.id,
-          state: "accepted",
-          agentId: created.id,
-          workspaceId: created.workspaceId,
-        };
+      // The atomic request-key claim is the exclusion: exactly one caller inserts the operation and
+      // runs the sequence; every concurrent or later caller gets the recorded disposition.
+      const id = newId();
+      const operation = await store.beginOperation({
+        ...identity,
+        id,
+        kind: "launch",
+        requestKey: input.request_key,
+        requestFingerprint: fingerprint,
+        creationKey: newId(),
+        messageId: newId(),
+        agentId: null,
+        workspaceId: null,
+        state: "creating",
+        errorCode: null,
       });
+      // ponytail: a launch left "creating" by a crash stays pending; reconcile by re-creating
+      // with its stored creationKey, which the daemon dedupes.
+      if (operation.id !== id) return resultForExistingOperation(operation);
+      const settle = settler(store, identity, operation.id, report);
+
+      let created: AgentSnapshot;
+      try {
+        created = await daemon.agents.create(operation.creationKey!, {
+          provider: input.provider,
+          title: input.title,
+          cwd: authorized.workingDirectory,
+          env: {},
+          toolPolicy: { preapproved: [] },
+          ...runtime,
+        });
+      } catch (error) {
+        throw await createFailure(error, operation.id, settle);
+      }
+
+      try {
+        await store.bindCreatedAgent(
+          identity,
+          operation.id,
+          created.id,
+          created.workspaceId,
+          now(),
+        );
+      } catch (error) {
+        // Ownership is not durable, so the task is never sent to this agent.
+        report(error, "paseo_connector.operation.bind");
+        await settle("outcome_unknown", "bind_failed");
+        throw new ConnectorError(
+          "outcome_unknown",
+          "the agent was created but could not be recorded; the task was not sent",
+          { operationId: operation.id, state: "outcome_unknown" },
+        );
+      }
+
+      try {
+        await daemon.agents.send(created.id, operation.messageId, input.task);
+      } catch (error) {
+        throw await promptFailure(error, operation, created.id, "created", settle);
+      }
+      await recordAccepted(identity, operation.id);
+      return {
+        operationId: operation.id,
+        state: "accepted",
+        agentId: created.id,
+        workspaceId: created.workspaceId,
+      };
     },
 
     async listAgents(principal) {
@@ -399,36 +428,34 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
         agentId: owned.agentId,
         text: input.text,
       });
-      return database.withAdvisoryLock(lockKey(identity, input.request_key), async () => {
-        const id = newId();
-        const operation = await store.beginOperation({
-          ...identity,
-          id,
-          kind: "message",
-          requestKey: input.request_key,
-          requestFingerprint: fingerprint,
-          creationKey: null,
-          messageId: newId(),
-          agentId: owned.agentId,
-          workspaceId: null,
-          state: "creating",
-          errorCode: null,
-        });
-        if (operation.id !== id) return resultForExistingOperation(operation);
-        const settle = settler(store, identity, operation.id);
-        try {
-          await daemon.agents.send(owned.agentId, operation.messageId, input.text);
-        } catch (error) {
-          throw await promptFailure(error, operation, owned.agentId, "failed", settle);
-        }
-        await store.setOperationState(identity, operation.id, "accepted", null);
-        return {
-          operationId: operation.id,
-          state: "accepted",
-          agentId: owned.agentId,
-          workspaceId: null,
-        };
+      const id = newId();
+      const operation = await store.beginOperation({
+        ...identity,
+        id,
+        kind: "message",
+        requestKey: input.request_key,
+        requestFingerprint: fingerprint,
+        creationKey: null,
+        messageId: newId(),
+        agentId: owned.agentId,
+        workspaceId: null,
+        state: "creating",
+        errorCode: null,
       });
+      if (operation.id !== id) return resultForExistingOperation(operation);
+      const settle = settler(store, identity, operation.id, report);
+      try {
+        await daemon.agents.send(owned.agentId, operation.messageId, input.text);
+      } catch (error) {
+        throw await promptFailure(error, operation, owned.agentId, "failed", settle);
+      }
+      await recordAccepted(identity, operation.id);
+      return {
+        operationId: operation.id,
+        state: "accepted",
+        agentId: owned.agentId,
+        workspaceId: null,
+      };
     },
 
     async cancelAgent(principal, raw) {
@@ -441,7 +468,7 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
         // Interrupt only: the session is kept, and the caller can never choose archive.
         await daemon.agents.control(owned.agentId, owned.workspaceId, "interrupt");
       } catch (error) {
-        if (isDaemonOutcomeUnknown(error)) {
+        if (isDaemonOutcomeUnknown(error) || !(error instanceof DaemonAgentError)) {
           throw new ConnectorError(
             "outcome_unknown",
             "the machine did not confirm the cancellation; inspect the agent",
@@ -508,13 +535,21 @@ function failureCode(operation: ConnectorOperation) {
 
 type Settle = (state: OperationState, errorCode: string) => Promise<void>;
 
-/** Records a disposition best-effort: the error being raised matters more than its record. */
-function settler(store: ConnectorStore, identity: Identity, operationId: string): Settle {
+/**
+ * Records a disposition best-effort: the error being raised matters more than its record. On a
+ * failed write the operation keeps its earlier, more conservative state and the failure is reported.
+ */
+function settler(
+  store: ConnectorStore,
+  identity: Identity,
+  operationId: string,
+  report: (error: unknown, operation: string) => void,
+): Settle {
   return async (state, errorCode) => {
     try {
       await store.setOperationState(identity, operationId, state, errorCode);
-    } catch {
-      // The operation keeps its earlier, more conservative state.
+    } catch (error) {
+      report(error, "paseo_connector.operation.record_failure");
     }
   };
 }
@@ -578,25 +613,28 @@ async function promptFailure(
   });
 }
 
-/** Maps a failed daemon read or control to a connector error; never passes a raw error through. */
+/**
+ * Maps a failed daemon read, or a refused cancellation, to a connector error; never passes a raw
+ * error through. Only an old daemon is machine_incompatible.
+ */
 function classifyDaemonFailure(error: unknown, agentId?: string): ConnectorError {
   if (error instanceof ConnectorError) return error;
-  if (error instanceof DaemonUnsupportedError)
-    return new ConnectorError("machine_incompatible", "the machine's Paseo is too old");
+  if (error instanceof DaemonUnsupportedError) return tooOld();
   if (error instanceof DaemonResponseLostError)
     return new ConnectorError("machine_offline", "the machine did not answer");
   if (error instanceof DaemonAgentError) {
     if (agentId !== undefined && AGENT_NOT_FOUND.test(error.message)) return sessionGone(agentId);
-    return new ConnectorError("machine_incompatible", "the machine refused the request");
+    return new ConnectorError("daemon_rejected", `the machine refused: ${cap(error.message, 500)}`);
   }
   if (error instanceof Error && OFFLINE_MESSAGES.has(error.message))
     return new ConnectorError("machine_offline", "machine is offline");
   if (error instanceof Error && error.message === "daemon_provider_snapshot_unsupported")
-    return new ConnectorError("machine_incompatible", "the machine's Paseo is too old");
-  return new ConnectorError(
-    "machine_incompatible",
-    "the machine returned a response the connector cannot read",
-  );
+    return tooOld();
+  return new ConnectorError("daemon_rejected", "the machine's answer could not be read");
+}
+
+function tooOld() {
+  return new ConnectorError("machine_incompatible", "the machine's Paseo is too old");
 }
 
 function sessionGone(agentId: string) {
@@ -664,10 +702,6 @@ function identityOf(authorized: AuthorizedConnection): Identity {
   };
 }
 
-function lockKey(identity: Identity, requestKey: string): string {
-  return `paseo-connector:${identity.connectionId}:${requestKey}`;
-}
-
 /** sha256 of the arguments, serialized in the fixed key order the callers construct. */
 function fingerprintOf(value: Record<string, string | null>): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -683,17 +717,20 @@ function ownedView(agent: OwnedAgent) {
 }
 
 function agentStateView(owned: OwnedAgent, snapshot: AgentSnapshot): AgentStateView {
+  const permissions = snapshot.pendingPermissions ?? [];
   return {
     ...ownedView(owned),
     status: snapshot.status,
     requiresAttention: snapshot.requiresAttention === true,
-    attentionReason: snapshot.attentionReason ?? null,
+    attentionReason:
+      snapshot.attentionReason == null ? null : cap(snapshot.attentionReason, LABEL_LIMIT),
     lastError: snapshot.lastError === undefined ? null : cap(snapshot.lastError, TEXT_LIMIT),
-    pendingPermissions: (snapshot.pendingPermissions ?? []).map((permission) => ({
-      id: stringOrNull(permission["id"]),
-      kind: stringOrNull(permission["kind"]),
-      name: stringOrNull(permission["name"]),
-      title: stringOrNull(permission["title"]),
+    pendingPermissionCount: permissions.length,
+    pendingPermissions: permissions.slice(0, PERMISSION_LIMIT).map((permission) => ({
+      id: labelOrNull(permission["id"]),
+      kind: labelOrNull(permission["kind"]),
+      name: labelOrNull(permission["name"]),
+      title: labelOrNull(permission["title"]),
     })),
   };
 }
@@ -747,6 +784,10 @@ function todoText(items: unknown): string | undefined {
   const parsed = TodoItems.safeParse(items);
   if (!parsed.success) return undefined;
   return parsed.data.map((todo) => `- [${todo.completed ? "x" : " "}] ${todo.text}`).join("\n");
+}
+
+function labelOrNull(value: unknown): string | null {
+  return typeof value === "string" ? cap(value, LABEL_LIMIT) : null;
 }
 
 function stringOrNull(value: unknown): string | null {

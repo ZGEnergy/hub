@@ -19,6 +19,20 @@ function sameIdentity(a: Identity, b: Identity): boolean {
   );
 }
 
+/** The repository's setOperationState rule: forward transitions only. */
+function isForwardTransition(
+  from: OperationState,
+  to: OperationState,
+  errorCode: string | null,
+): boolean {
+  if (from === "creating") return to === "accepted" || to === "failed" || to === "outcome_unknown";
+  if (from === "created")
+    return (
+      to === "accepted" || to === "outcome_unknown" || (to === "created" && errorCode !== null)
+    );
+  return false;
+}
+
 /**
  * Deterministic parity with ConnectorRepository for MemoryDatabase tests. It is not a production
  * fallback: it does not model users, organizations or daemons, only the connector's own rules.
@@ -179,13 +193,7 @@ export class MemoryConnectorStore implements ConnectorStore {
     const operation = this.operations.get(operationId);
     if (operation === undefined || !sameIdentity(operation, identity))
       throw new ConnectorError("not_found");
-    const owned = this.agents.some(
-      (agent) => sameIdentity(agent, identity) && agent.launchOperationId === operationId,
-    );
-    if (
-      (operation.state === "accepted" && state !== "accepted") ||
-      (owned ? state === "creating" || state === "failed" : state === "created")
-    )
+    if (!isForwardTransition(operation.state, state, errorCode))
       throw new ConnectorError("request_conflict");
     Object.assign(operation, { state, errorCode });
   }

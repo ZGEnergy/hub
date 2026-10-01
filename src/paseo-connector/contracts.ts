@@ -72,7 +72,9 @@ export type ConnectorErrorCode =
   | "create_rejected"
   | "prompt_rejected"
   | "outcome_unknown"
-  | "invalid_cursor";
+  | "invalid_cursor"
+  /** The daemon refused a request, or answered one unreadably; carries a bounded reason. */
+  | "daemon_rejected";
 
 /**
  * The caller's own operation identity carried by an unresolved or partial disposition, so it can
@@ -95,19 +97,25 @@ export class ConnectorError extends Error {
   }
 }
 
-/** Service inputs, shared with the MCP layer. Parsing applies the defaults the service relies on. */
+/** Longest task or follow-up text accepted. */
+export const CONNECTOR_TEXT_MAX = 100_000;
+/** Longest title, provider, model, mode, agent id or cursor epoch accepted. */
+export const CONNECTOR_NAME_MAX = 200;
+const name = () => z.string().min(1).max(CONNECTOR_NAME_MAX);
+
+/** Service inputs, shared with the MCP layer. */
 export const ConnectorCursorInput = z.object({
-  epoch: z.string(),
+  epoch: z.string().max(CONNECTOR_NAME_MAX),
   seq: z.number().int().nonnegative(),
 });
 
 export const StartAgentInput = z.object({
   request_key: z.uuid(),
-  task: z.string().min(1),
-  title: z.string().min(1),
-  provider: z.string().min(1),
-  model: z.string().min(1).optional(),
-  mode: z.string().min(1).optional(),
+  task: z.string().min(1).max(CONNECTOR_TEXT_MAX),
+  title: name(),
+  provider: name(),
+  model: name().optional(),
+  mode: name().optional(),
 });
 export type StartAgentInput = z.input<typeof StartAgentInput>;
 
@@ -118,7 +126,7 @@ export const AGENT_TIMELINE_MAX_LIMIT = 100;
 /** `direction` defaults to "tail", or to "after" when a cursor is given. */
 export const GetAgentInput = z.union([
   z.object({
-    agent_id: z.string().min(1),
+    agent_id: name(),
     cursor: ConnectorCursorInput.optional(),
     direction: z.enum(["tail", "before", "after"]).optional(),
     limit: z.number().int().min(1).max(AGENT_TIMELINE_MAX_LIMIT).optional(),
@@ -129,12 +137,12 @@ export type GetAgentInput = z.input<typeof GetAgentInput>;
 
 export const SendAgentMessageInput = z.object({
   request_key: z.uuid(),
-  agent_id: z.string().min(1),
-  text: z.string().min(1),
+  agent_id: name(),
+  text: z.string().min(1).max(CONNECTOR_TEXT_MAX),
 });
 export type SendAgentMessageInput = z.input<typeof SendAgentMessageInput>;
 
-export const CancelAgentInput = z.object({ agent_id: z.string().min(1) });
+export const CancelAgentInput = z.object({ agent_id: name() });
 export type CancelAgentInput = z.input<typeof CancelAgentInput>;
 
 export interface ConnectorStore {

@@ -490,7 +490,10 @@ export function describeConnectorStoreContract(open: () => Promise<ConnectorStor
       errorCode: "prompt_rejected",
       agentId: "agent-a",
     });
-    await fixture.store.setOperationState(alice, launch.id, "outcome_unknown", "lost");
+    await rejectsWith(
+      fixture.store.setOperationState(alice, launch.id, "created", null),
+      "request_conflict",
+    );
     await fixture.store.setOperationState(alice, launch.id, "accepted", null);
     expect(await fixture.store.findOperation(alice, launch.id)).toMatchObject({
       state: "accepted",
@@ -501,6 +504,49 @@ export function describeConnectorStoreContract(open: () => Promise<ConnectorStor
     expect(await fixture.store.findOwnedAgent(alice, "agent-a")).toMatchObject({
       launchOperationId: launch.id,
     });
+  });
+
+  it("moves operations forward only and keeps failed and outcome_unknown final", async () => {
+    const fixture = fixtureOf();
+    const alice = await activated(fixture, fixture.aliceUserId);
+    const failed = await fixture.store.beginOperation(operationFor(alice));
+    await fixture.store.setOperationState(alice, failed.id, "failed", "create_rejected");
+    const unknown = await fixture.store.beginOperation(operationFor(alice));
+    await fixture.store.setOperationState(alice, unknown.id, "outcome_unknown", "lost");
+    for (const operation of [failed, unknown]) {
+      for (const state of [
+        "creating",
+        "created",
+        "accepted",
+        "failed",
+        "outcome_unknown",
+      ] as const) {
+        await rejectsWith(
+          fixture.store.setOperationState(alice, operation.id, state, "late"),
+          "request_conflict",
+        );
+      }
+    }
+    expect(await fixture.store.findOperation(alice, failed.id)).toMatchObject({
+      state: "failed",
+      errorCode: "create_rejected",
+    });
+    expect(await fixture.store.findOperation(alice, unknown.id)).toMatchObject({
+      state: "outcome_unknown",
+      errorCode: "lost",
+    });
+    const fresh = await fixture.store.beginOperation(operationFor(alice));
+    await rejectsWith(
+      fixture.store.setOperationState(alice, fresh.id, "creating", null),
+      "request_conflict",
+    );
+    const bound = await fixture.store.beginOperation(operationFor(alice));
+    await fixture.store.bindCreatedAgent(alice, bound.id, "agent-b", "workspace-b", T0);
+    await fixture.store.setOperationState(alice, bound.id, "outcome_unknown", "lost");
+    await rejectsWith(
+      fixture.store.setOperationState(alice, bound.id, "accepted", null),
+      "request_conflict",
+    );
   });
 
   it("hides one owner's agents from every other identity, as if they did not exist", async () => {

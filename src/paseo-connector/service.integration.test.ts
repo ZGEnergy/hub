@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createApplicationRuntime } from "../application-runtime.js";
@@ -22,7 +23,11 @@ import {
   type DaemonCreateAgentOptions,
 } from "../daemons/protocol.js";
 import { createDatabase } from "../db/pg.js";
-import { embeddedDatabaseRuntime, type DatabaseRuntimeBundle } from "../db/runtime/index.js";
+import {
+  embeddedDatabaseRuntime,
+  postgresDatabaseRuntime,
+  type DatabaseRuntimeBundle,
+} from "../db/runtime/index.js";
 import type { Database } from "../db/types.js";
 import type { HubProviderSnapshotEntry } from "../hub/protocol.js";
 import type { ConnectorPrincipal } from "./authorization.js";
@@ -32,7 +37,7 @@ import {
   type Identity,
   type StartAgentInput,
 } from "./contracts.js";
-import { createConnectorService, type ConnectorService } from "./service.js";
+import { createConnectorService, type ConnectorService, type OperationResult } from "./service.js";
 
 const WORKING_DIRECTORY = "/srv/work/project";
 const anyString: unknown = expect.any(String);
@@ -80,6 +85,10 @@ class DaemonDouble implements AgentConnection {
   sendFault: "reject" | "lost" | "unknown" | undefined;
   nextAgentId: string | undefined;
   beforeSend: ((agentId: string) => Promise<void>) | undefined;
+  beforeCreate: (() => Promise<void>) | undefined;
+  /** Faults on timeline reads and on control requests, which act before any effect. */
+  readFault: "reject" | "unsupported" | "unreadable" | undefined;
+  controlFault: "reject" | "unreadable" | undefined;
   private readonly creations = new Map<string, { body: string; agentId: string }>();
   private readonly receipts = new Map<string, string>();
   private sequence = 0;
@@ -112,6 +121,7 @@ class DaemonDouble implements AgentConnection {
 
   async create(key: string, options: DaemonCreateAgentOptions): Promise<AgentSnapshot> {
     this.calls.push({ method: "create", args: [key, options] });
+    await this.beforeCreate?.();
     if (this.createFault === "unsupported")
       throw new DaemonUnsupportedError("Update the Paseo daemon to run Hub agents");
     if (this.createFault === "reject")
@@ -168,6 +178,9 @@ class DaemonDouble implements AgentConnection {
 
   async control(agentId: string, workspaceId: string, action: "interrupt" | "archive") {
     this.calls.push({ method: "control", args: [agentId, workspaceId, action] });
+    if (this.controlFault === "reject")
+      throw new DaemonAgentError("Permission denied: workspace.write is required");
+    if (this.controlFault === "unreadable") z.object({ agent: z.string() }).parse({});
     const agent = this.require(agentId);
     if (action === "archive") this.agents.delete(agentId);
     else agent.snapshot.status = "idle";
@@ -182,6 +195,11 @@ class DaemonDouble implements AgentConnection {
     input: { cursor?: AgentTimelineCursor; direction: "tail" | "before" | "after"; limit: number },
   ): Promise<AgentTimelinePage> {
     this.calls.push({ method: "timeline", args: [agentId, input] });
+    if (this.readFault === "unsupported")
+      throw new DaemonUnsupportedError("Update the Paseo daemon to run Hub agents");
+    if (this.readFault === "reject")
+      throw new DaemonAgentError("Permission denied: workspace.read is required");
+    if (this.readFault === "unreadable") z.object({ agent: z.string() }).parse({});
     const agent = this.require(agentId);
     const stale = input.cursor !== undefined && input.cursor.epoch !== agent.epoch;
     const direction = stale ? "tail" : input.direction;
@@ -243,6 +261,7 @@ function daemonConnection(daemon: DaemonDouble): DaemonConnection {
   };
 }
 
+/** Attaches its handler at once, so a list of these can be awaited in turn without stray rejections. */
 async function rejection(promise: Promise<unknown>): Promise<ConnectorError> {
   const error = await promise.then(
     () => undefined,
@@ -349,14 +368,28 @@ function launch(overrides: Partial<StartAgentInput> = {}): StartAgentInput {
   };
 }
 
-describe("Paseo connector service on embedded PGlite", () => {
+let postgres: StartedPostgreSqlContainer;
+beforeAll(async () => {
+  postgres = await new PostgreSqlContainer("postgres:17-alpine").start();
+}, 120_000);
+afterAll(async () => {
+  await postgres?.stop();
+});
+
+describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s", (kind) => {
   let root: string;
   let bundle: DatabaseRuntimeBundle;
   let database: Database;
 
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), "hub-connector-service-"));
-    bundle = await embeddedDatabaseRuntime(join(root, "database"));
+    if (kind === "embedded") {
+      bundle = await embeddedDatabaseRuntime(join(root, "database"));
+    } else {
+      const url = new URL(postgres.getConnectionUri());
+      url.pathname = `/connector_service_${randomUUID().replaceAll("-", "")}`;
+      bundle = await postgresDatabaseRuntime(url.href);
+    }
     await bundle.runtime.migrate();
     database = createDatabase(bundle.runtime, bundle.locks);
   }, 120_000);
@@ -371,17 +404,20 @@ describe("Paseo connector service on embedded PGlite", () => {
   let service: ConnectorService;
   let alice: Awaited<ReturnType<typeof connect>>;
   let bob: Awaited<ReturnType<typeof connect>>;
+  let reported: { error: unknown; operation: string }[];
 
   beforeEach(async () => {
     machine = await seedMachine(bundle, database);
     daemon = new DaemonDouble();
     online = true;
+    reported = [];
     const connection = daemonConnection(daemon);
     service = createConnectorService({
       database,
       connectionForDaemon: (daemonId) =>
         online && daemonId === machine.daemonId ? connection : undefined,
       now: () => T0,
+      reportFailure: (error, operation) => reported.push({ error, operation }),
     });
     alice = await connect(database, machine, machine.alice);
     bob = await connect(database, machine, machine.bob);
@@ -591,18 +627,193 @@ describe("Paseo connector service on embedded PGlite", () => {
     expect(daemon.delivered).toHaveLength(1);
   });
 
-  it("lets only one of several concurrent same-key launches reach the daemon", async () => {
+  it("lets only the caller that claims a request key reach the daemon; the rest see it pending", async () => {
     const request = launch();
-    const results = await Promise.all(
-      Array.from({ length: 4 }, () => service.startAgent(alice.principal, request)),
+    // The winner's creation is held open until every other caller has answered, so the others
+    // necessarily meet the claimed, still-unresolved operation.
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    daemon.beforeCreate = () => held;
+    const answered: OperationResult[] = [];
+    const record = (result: OperationResult) => {
+      answered.push(result);
+      return result;
+    };
+    const calls = Array.from({ length: 4 }, () =>
+      service.startAgent(alice.principal, request).then(record),
     );
+    await vi.waitFor(() => expect(answered).toHaveLength(3), { timeout: 10_000 });
+    expect(daemon.calledMethods().filter((method) => method === "create")).toHaveLength(1);
+    release();
+    const results = await Promise.all(calls);
+
     expect(new Set(results.map((result) => result.operationId)).size).toBe(1);
-    expect(
-      results.every((result) => result.state === "accepted" && result.agentId === "agent-1"),
-    ).toBe(true);
+    const accepted = results.filter((result) => result.state === "accepted");
+    expect(accepted).toEqual([
+      {
+        operationId: results[0]!.operationId,
+        state: "accepted",
+        agentId: "agent-1",
+        workspaceId: "workspace-agent-1",
+      },
+    ]);
+    expect(answered.slice(0, 3)).toEqual(
+      Array.from({ length: 3 }, () => ({
+        operationId: results[0]!.operationId,
+        state: "creating",
+        agentId: null,
+        workspaceId: null,
+      })),
+    );
     expect(daemon.calledMethods().filter((method) => method === "create")).toHaveLength(1);
     expect(daemon.calledMethods().filter((method) => method === "send")).toHaveLength(1);
     expect(await operationsOf(alice.identity)).toBe(1);
+    expect(await service.startAgent(alice.principal, request)).toEqual(accepted[0]);
+  });
+
+  it("returns the daemon's acceptance when recording it fails, and replays it as unresolved with its ids", async () => {
+    const store = database.connector;
+    const setOperationState = store.setOperationState.bind(store);
+    const failure = new Error("connection terminated unexpectedly");
+    const spy = vi
+      .spyOn(store, "setOperationState")
+      .mockImplementation(async (identity, operationId, state, errorCode) => {
+        if (state === "accepted") throw failure;
+        return setOperationState(identity, operationId, state, errorCode);
+      });
+    const request = launch();
+    let started: OperationResult;
+    let followUp: OperationResult;
+    const message = { request_key: randomUUID(), agent_id: "agent-1", text: "Also add tests" };
+    try {
+      started = await service.startAgent(alice.principal, request);
+      followUp = await service.sendAgentMessage(alice.principal, message);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(started).toEqual({
+      operationId: anyString,
+      state: "accepted",
+      agentId: "agent-1",
+      workspaceId: "workspace-agent-1",
+    });
+    expect(followUp).toEqual({
+      operationId: anyString,
+      state: "accepted",
+      agentId: "agent-1",
+      workspaceId: null,
+    });
+    expect(reported).toEqual([
+      { error: failure, operation: "paseo_connector.operation.record_accepted" },
+      { error: failure, operation: "paseo_connector.operation.record_accepted" },
+    ]);
+    expect(
+      await database.connector.findOperation(alice.identity, started.operationId),
+    ).toMatchObject({ state: "created", errorCode: null, agentId: "agent-1" });
+    expect(
+      await database.connector.findOperation(alice.identity, followUp.operationId),
+    ).toMatchObject({ state: "creating", errorCode: null, agentId: "agent-1" });
+
+    expect(await rejection(service.startAgent(alice.principal, request))).toMatchObject({
+      code: "outcome_unknown",
+      details: { operationId: started.operationId, agentId: "agent-1", state: "created" },
+    });
+    expect(await service.sendAgentMessage(alice.principal, message)).toEqual({
+      operationId: followUp.operationId,
+      state: "creating",
+      agentId: "agent-1",
+      workspaceId: null,
+    });
+    expect(daemon.calledMethods().filter((method) => method === "send")).toHaveLength(2);
+    expect(daemon.delivered.map((delivery) => delivery.text)).toEqual([
+      "Fix the failing build",
+      "Also add tests",
+    ]);
+  });
+
+  it("names a daemon refusal as such and keeps machine_incompatible for an old daemon", async () => {
+    const started = await service.startAgent(alice.principal, launch());
+    const agentId = started.agentId!;
+    daemon.readFault = "reject";
+    expect(await rejection(service.getAgent(alice.principal, { agent_id: agentId }))).toMatchObject(
+      {
+        code: "daemon_rejected",
+        message: "the machine refused: Permission denied: workspace.read is required",
+      },
+    );
+    daemon.readFault = "unreadable";
+    expect(await rejection(service.getAgent(alice.principal, { agent_id: agentId }))).toMatchObject(
+      {
+        code: "daemon_rejected",
+        message: "the machine's answer could not be read",
+      },
+    );
+    daemon.readFault = "unsupported";
+    expect((await rejection(service.getAgent(alice.principal, { agent_id: agentId }))).code).toBe(
+      "machine_incompatible",
+    );
+    daemon.controlFault = "reject";
+    expect(
+      await rejection(service.cancelAgent(alice.principal, { agent_id: agentId })),
+    ).toMatchObject({
+      code: "daemon_rejected",
+      message: "the machine refused: Permission denied: workspace.write is required",
+    });
+    // A cancellation is a mutation: an answer that cannot be read leaves its outcome unknown.
+    daemon.controlFault = "unreadable";
+    expect(
+      await rejection(service.cancelAgent(alice.principal, { agent_id: agentId })),
+    ).toMatchObject({
+      code: "outcome_unknown",
+      details: { agentId },
+    });
+  });
+
+  it("bounds what it accepts and what it returns", async () => {
+    for (const request of [
+      launch({ task: "x".repeat(100_001) }),
+      launch({ title: "x".repeat(201) }),
+      launch({ provider: "x".repeat(201) }),
+      launch({ model: "x".repeat(201) }),
+      launch({ mode: "x".repeat(201) }),
+    ]) {
+      await expect(service.startAgent(alice.principal, request)).rejects.toThrow();
+    }
+    expect(daemon.calls).toEqual([]);
+    expect(await operationsOf(alice.identity)).toBe(0);
+
+    const started = await service.startAgent(
+      alice.principal,
+      launch({ task: "x".repeat(100_000) }),
+    );
+    await expect(
+      service.sendAgentMessage(alice.principal, {
+        request_key: randomUUID(),
+        agent_id: started.agentId!,
+        text: "x".repeat(100_001),
+      }),
+    ).rejects.toThrow();
+    const agent = daemon.agents.get(started.agentId!)!;
+    agent.snapshot = {
+      ...agent.snapshot,
+      requiresAttention: true,
+      attentionReason: "r".repeat(1_000),
+      pendingPermissions: Array.from({ length: 25 }, (_, index) => ({
+        id: `perm-${index}`,
+        kind: "tool",
+        name: "n".repeat(1_000),
+        title: "t".repeat(1_000),
+      })),
+    };
+    const result = await service.getAgent(alice.principal, { agent_id: started.agentId! });
+    if (result.type !== "agent") throw new Error("expected an agent result");
+    expect(result.agent.attentionReason).toHaveLength(200);
+    expect(result.agent.pendingPermissionCount).toBe(25);
+    expect(result.agent.pendingPermissions).toHaveLength(20);
+    expect(result.agent.pendingPermissions[0]!.name).toHaveLength(200);
+    expect(result.agent.pendingPermissions[0]!.title).toHaveLength(200);
   });
 
   it("refuses a reused request key for a different task", async () => {
@@ -677,8 +888,8 @@ describe("Paseo connector service on embedded PGlite", () => {
           text: "hello",
         }),
         service.cancelAgent(alice.principal, { agent_id: agentId }),
-      ]) {
-        const error = await rejection(attempt);
+      ].map(rejection)) {
+        const error = await attempt;
         expect(error.code).toBe("not_found");
         expect(error.details).toBeUndefined();
       }
@@ -718,8 +929,8 @@ describe("Paseo connector service on embedded PGlite", () => {
       service.getAgent(alice.principal, { agent_id: started.agentId! }),
       service.cancelAgent(alice.principal, { agent_id: started.agentId! }),
       service.listAgents(alice.principal),
-    ]) {
-      expect((await rejection(attempt)).code).toBe("connection_revoked");
+    ].map(rejection)) {
+      expect((await attempt).code).toBe("connection_revoked");
     }
     expect(
       await database.connector.revokeConnection(machine.bob, bob.principal.connectionId, T0),
@@ -727,8 +938,8 @@ describe("Paseo connector service on embedded PGlite", () => {
     for (const attempt of [
       service.startAgent(bob.principal, launch()),
       service.getConnection(bob.principal),
-    ]) {
-      expect((await rejection(attempt)).code).toBe("connection_revoked");
+    ].map(rejection)) {
+      expect((await attempt).code).toBe("connection_revoked");
     }
     expect(daemon.calls).toEqual([]);
     // Revocation does not stop work already running.
@@ -747,8 +958,8 @@ describe("Paseo connector service on embedded PGlite", () => {
         text: "more",
       }),
       service.cancelAgent(reader, { agent_id: started.agentId! }),
-    ]) {
-      expect((await rejection(attempt)).code).toBe("insufficient_scope");
+    ].map(rejection)) {
+      expect((await attempt).code).toBe("insufficient_scope");
     }
     expect(daemon.calls).toEqual([]);
     await expect(service.getAgent(reader, { agent_id: started.agentId! })).resolves.toMatchObject({
