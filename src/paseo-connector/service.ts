@@ -38,10 +38,14 @@ import {
   type OwnedAgent,
 } from "./contracts.js";
 
-/** A launch or follow-up the daemon accepted, or one still unresolved ("creating"). */
+/**
+ * A launch or follow-up the daemon accepted, or one still pending: "creating" (nothing recorded
+ * yet beyond the claim) or "created" (a launch whose agent is recorded and whose task has not been
+ * acknowledged). Pending is never a reason to retry with a new key; inspect the operation instead.
+ */
 export interface OperationResult {
   operationId: string;
-  state: "accepted" | "creating";
+  state: "accepted" | "creating" | "created";
   /** Null only for a launch whose agent is not yet recorded. */
   agentId: string | null;
   /** Set for a launch once its agent is recorded; always null for a follow-up. */
@@ -159,6 +163,13 @@ export interface ConnectorService {
   cancelAgent(principal: ConnectorPrincipal, input: CancelAgentInput): Promise<CancelResult>;
 }
 
+/** Reports a failure the caller is not shown, with the caller's own operation id for diagnosis. */
+export type FailureReporter = (
+  error: unknown,
+  operation: string,
+  context: { operationId: string },
+) => void;
+
 export interface ConnectorServiceOptions {
   database: Database;
   /** The app's resolver (`HubRuntime.connectionForDaemon`), test injection included. */
@@ -166,7 +177,7 @@ export interface ConnectorServiceOptions {
   now?: () => Date;
   newId?: () => string;
   /** Where failures that must not reach the caller go; defaults to Hub's failure reporter. */
-  reportFailure?: (error: unknown, operation: string) => void;
+  reportFailure?: FailureReporter;
 }
 
 /** Longest single text field returned from a timeline. */
@@ -194,10 +205,10 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
   const now = options.now ?? (() => new Date());
   const newId = options.newId ?? randomUUID;
 
-  const report =
+  const report: FailureReporter =
     options.reportFailure ??
-    ((error: unknown, operation: string) => {
-      reportFailure(error, { operation, component: "paseo_connector" });
+    ((error, operation, context) => {
+      reportFailure(error, { operation, component: "paseo_connector" }, { diagnostic: context });
     });
 
   /**
@@ -209,7 +220,7 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
     try {
       await store.setOperationState(identity, operationId, "accepted", null);
     } catch (error) {
-      report(error, "paseo_connector.operation.record_accepted");
+      report(error, "paseo_connector.operation.record_accepted", { operationId });
     }
   };
 
@@ -316,7 +327,7 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
         );
       } catch (error) {
         // Ownership is not durable, so the task is never sent to this agent.
-        report(error, "paseo_connector.operation.bind");
+        report(error, "paseo_connector.operation.bind", { operationId: operation.id });
         await settle("outcome_unknown", "bind_failed");
         throw new ConnectorError(
           "outcome_unknown",
@@ -468,6 +479,9 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
         // Interrupt only: the session is kept, and the caller can never choose archive.
         await daemon.agents.control(owned.agentId, owned.workspaceId, "interrupt");
       } catch (error) {
+        // Refused before anything was sent: the registry had no live socket.
+        if (error instanceof Error && error.message === "daemon_not_connected")
+          throw new ConnectorError("machine_offline", "machine is offline");
         if (isDaemonOutcomeUnknown(error) || !(error instanceof DaemonAgentError)) {
           throw new ConnectorError(
             "outcome_unknown",
@@ -507,7 +521,13 @@ export function resultForExistingOperation(operation: ConnectorOperation): Opera
     state: operation.state,
     ...(operation.agentId === null ? {} : { agentId: operation.agentId }),
   };
-  if (operation.state === "accepted" || operation.state === "creating") {
+  // Pending: still in flight in another caller, or stopped before the daemon's acknowledgement was
+  // recorded. Either way the ids are returned and nothing is sent again.
+  if (
+    operation.state === "accepted" ||
+    operation.state === "creating" ||
+    (operation.state === "created" && operation.errorCode === null)
+  ) {
     return {
       operationId: operation.id,
       state: operation.state,
@@ -523,8 +543,7 @@ export function resultForExistingOperation(operation: ConnectorOperation): Opera
     throw new ConnectorError(operation.errorCode, "the task was not accepted", details);
   if (operation.state === "failed")
     throw new ConnectorError(failureCode(operation), "the operation failed", details);
-  // outcome_unknown, or "created" with no recorded rejection: the attempt stopped between recording
-  // the agent and the daemon's acknowledgement of the task.
+  // outcome_unknown, or "created" with a reason this service does not record.
   throw new ConnectorError("outcome_unknown", "the operation's outcome is unconfirmed", details);
 }
 
@@ -543,13 +562,13 @@ function settler(
   store: ConnectorStore,
   identity: Identity,
   operationId: string,
-  report: (error: unknown, operation: string) => void,
+  report: FailureReporter,
 ): Settle {
   return async (state, errorCode) => {
     try {
       await store.setOperationState(identity, operationId, state, errorCode);
     } catch (error) {
-      report(error, "paseo_connector.operation.record_failure");
+      report(error, "paseo_connector.operation.record_failure", { operationId });
     }
   };
 }

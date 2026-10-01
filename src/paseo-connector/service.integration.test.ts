@@ -88,7 +88,7 @@ class DaemonDouble implements AgentConnection {
   beforeCreate: (() => Promise<void>) | undefined;
   /** Faults on timeline reads and on control requests, which act before any effect. */
   readFault: "reject" | "unsupported" | "unreadable" | undefined;
-  controlFault: "reject" | "unreadable" | undefined;
+  controlFault: "reject" | "unreadable" | "not_connected" | "disconnected" | undefined;
   private readonly creations = new Map<string, { body: string; agentId: string }>();
   private readonly receipts = new Map<string, string>();
   private sequence = 0;
@@ -181,6 +181,9 @@ class DaemonDouble implements AgentConnection {
     if (this.controlFault === "reject")
       throw new DaemonAgentError("Permission denied: workspace.write is required");
     if (this.controlFault === "unreadable") z.object({ agent: z.string() }).parse({});
+    // The registry's own errors: refused before sending, and in flight when the socket closed.
+    if (this.controlFault === "not_connected") throw new Error("daemon_not_connected");
+    if (this.controlFault === "disconnected") throw new Error("daemon disconnected");
     const agent = this.require(agentId);
     if (action === "archive") this.agents.delete(agentId);
     else agent.snapshot.status = "idle";
@@ -404,7 +407,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
   let service: ConnectorService;
   let alice: Awaited<ReturnType<typeof connect>>;
   let bob: Awaited<ReturnType<typeof connect>>;
-  let reported: { error: unknown; operation: string }[];
+  let reported: { error: unknown; operation: string; context: { operationId: string } }[];
 
   beforeEach(async () => {
     machine = await seedMachine(bundle, database);
@@ -417,7 +420,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
       connectionForDaemon: (daemonId) =>
         online && daemonId === machine.daemonId ? connection : undefined,
       now: () => T0,
-      reportFailure: (error, operation) => reported.push({ error, operation }),
+      reportFailure: (error, operation, context) => reported.push({ error, operation, context }),
     });
     alice = await connect(database, machine, machine.alice);
     bob = await connect(database, machine, machine.bob);
@@ -572,6 +575,13 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
     expect(await database.connector.findOwnedAgent(bob.identity, "agent-shared")).toMatchObject({
       launchOperationId: bobLaunch.id,
     });
+    expect(reported).toEqual([
+      {
+        error: expect.any(ConnectorError) as unknown,
+        operation: "paseo_connector.operation.bind",
+        context: { operationId: error.details!.operationId },
+      },
+    ]);
   });
 
   it("keeps the created agent owned when the prompt is rejected, and replays without resending", async () => {
@@ -629,13 +639,18 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
 
   it("lets only the caller that claims a request key reach the daemon; the rest see it pending", async () => {
     const request = launch();
-    // The winner's creation is held open until every other caller has answered, so the others
-    // necessarily meet the claimed, still-unresolved operation.
-    let release = () => {};
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
+    // The winner's creation, then its send, are held open, so the other callers necessarily meet
+    // the claimed operation first unresolved, then with its agent recorded but unacknowledged.
+    let releaseCreate = () => {};
+    const createHeld = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
     });
-    daemon.beforeCreate = () => held;
+    let releaseSend = () => {};
+    const sendHeld = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    daemon.beforeCreate = () => createHeld;
+    daemon.beforeSend = () => sendHeld;
     const answered: OperationResult[] = [];
     const record = (result: OperationResult) => {
       answered.push(result);
@@ -646,34 +661,42 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
     );
     await vi.waitFor(() => expect(answered).toHaveLength(3), { timeout: 10_000 });
     expect(daemon.calledMethods().filter((method) => method === "create")).toHaveLength(1);
-    release();
-    const results = await Promise.all(calls);
-
-    expect(new Set(results.map((result) => result.operationId)).size).toBe(1);
-    const accepted = results.filter((result) => result.state === "accepted");
-    expect(accepted).toEqual([
-      {
-        operationId: results[0]!.operationId,
-        state: "accepted",
-        agentId: "agent-1",
-        workspaceId: "workspace-agent-1",
-      },
-    ]);
-    expect(answered.slice(0, 3)).toEqual(
+    const operationId = answered[0]!.operationId;
+    expect(answered).toEqual(
       Array.from({ length: 3 }, () => ({
-        operationId: results[0]!.operationId,
+        operationId,
         state: "creating",
         agentId: null,
         workspaceId: null,
       })),
     );
+
+    releaseCreate();
+    await vi.waitFor(() => expect(daemon.calledMethods()).toContain("send"), { timeout: 10_000 });
+    expect(await service.startAgent(alice.principal, request)).toEqual({
+      operationId,
+      state: "created",
+      agentId: "agent-1",
+      workspaceId: "workspace-agent-1",
+    });
+    releaseSend();
+    const results = await Promise.all(calls);
+
+    const accepted = {
+      operationId,
+      state: "accepted",
+      agentId: "agent-1",
+      workspaceId: "workspace-agent-1",
+    };
+    expect(results.filter((result) => result.state === "accepted")).toEqual([accepted]);
     expect(daemon.calledMethods().filter((method) => method === "create")).toHaveLength(1);
     expect(daemon.calledMethods().filter((method) => method === "send")).toHaveLength(1);
+    expect(daemon.delivered).toHaveLength(1);
     expect(await operationsOf(alice.identity)).toBe(1);
-    expect(await service.startAgent(alice.principal, request)).toEqual(accepted[0]);
+    expect(await service.startAgent(alice.principal, request)).toEqual(accepted);
   });
 
-  it("returns the daemon's acceptance when recording it fails, and replays it as unresolved with its ids", async () => {
+  it("returns the daemon's acceptance when recording it fails, and replays it as pending with its ids", async () => {
     const store = database.connector;
     const setOperationState = store.setOperationState.bind(store);
     const failure = new Error("connection terminated unexpectedly");
@@ -706,8 +729,16 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
       workspaceId: null,
     });
     expect(reported).toEqual([
-      { error: failure, operation: "paseo_connector.operation.record_accepted" },
-      { error: failure, operation: "paseo_connector.operation.record_accepted" },
+      {
+        error: failure,
+        operation: "paseo_connector.operation.record_accepted",
+        context: { operationId: started.operationId },
+      },
+      {
+        error: failure,
+        operation: "paseo_connector.operation.record_accepted",
+        context: { operationId: followUp.operationId },
+      },
     ]);
     expect(
       await database.connector.findOperation(alice.identity, started.operationId),
@@ -716,9 +747,11 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
       await database.connector.findOperation(alice.identity, followUp.operationId),
     ).toMatchObject({ state: "creating", errorCode: null, agentId: "agent-1" });
 
-    expect(await rejection(service.startAgent(alice.principal, request))).toMatchObject({
-      code: "outcome_unknown",
-      details: { operationId: started.operationId, agentId: "agent-1", state: "created" },
+    expect(await service.startAgent(alice.principal, request)).toEqual({
+      operationId: started.operationId,
+      state: "created",
+      agentId: "agent-1",
+      workspaceId: "workspace-agent-1",
     });
     expect(await service.sendAgentMessage(alice.principal, message)).toEqual({
       operationId: followUp.operationId,
@@ -731,6 +764,48 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
       "Fix the failing build",
       "Also add tests",
     ]);
+  });
+
+  it("reports a failed disposition write and still raises the classified error", async () => {
+    const store = database.connector;
+    const setOperationState = store.setOperationState.bind(store);
+    const failure = new Error("connection terminated unexpectedly");
+    const spy = vi
+      .spyOn(store, "setOperationState")
+      .mockImplementation(async (identity, operationId, state, errorCode) => {
+        if (state === "failed") throw failure;
+        return setOperationState(identity, operationId, state, errorCode);
+      });
+    daemon.createFault = "reject";
+    const request = launch();
+    let error: ConnectorError;
+    try {
+      error = await rejection(service.startAgent(alice.principal, request));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(error.code).toBe("create_rejected");
+    const operationId = error.details!.operationId!;
+    expect(reported).toEqual([
+      {
+        error: failure,
+        operation: "paseo_connector.operation.record_failure",
+        context: { operationId },
+      },
+    ]);
+    // The operation keeps its conservative state, so a replay is pending and creates nothing.
+    expect(await database.connector.findOperation(alice.identity, operationId)).toMatchObject({
+      state: "creating",
+    });
+    daemon.createFault = undefined;
+    expect(await service.startAgent(alice.principal, request)).toEqual({
+      operationId,
+      state: "creating",
+      agentId: null,
+      workspaceId: null,
+    });
+    expect(daemon.calledMethods().filter((method) => method === "create")).toHaveLength(1);
+    expect(daemon.delivered).toEqual([]);
   });
 
   it("names a daemon refusal as such and keeps machine_incompatible for an old daemon", async () => {
@@ -769,6 +844,16 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
       code: "outcome_unknown",
       details: { agentId },
     });
+    // Refused before sending: nothing reached the machine, so it is simply offline.
+    daemon.controlFault = "not_connected";
+    expect(
+      (await rejection(service.cancelAgent(alice.principal, { agent_id: agentId }))).code,
+    ).toBe("machine_offline");
+    // Lost in flight: the machine may have acted.
+    daemon.controlFault = "disconnected";
+    expect(
+      await rejection(service.cancelAgent(alice.principal, { agent_id: agentId })),
+    ).toMatchObject({ code: "outcome_unknown", details: { agentId } });
   });
 
   it("bounds what it accepts and what it returns", async () => {
