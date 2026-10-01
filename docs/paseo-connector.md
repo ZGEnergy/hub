@@ -183,3 +183,45 @@ PASEO_HUB_APP_URL=http://localhost:3000 PORT=3000 PASEO_HUB_DATA_DIR=./.hub-data
 Sign up, create an organization and enroll a daemon as usual. Then point the MCP Inspector
 (`npx @modelcontextprotocol/inspector`) at `http://localhost:3000/mcp/paseo` with the Streamable HTTP
 transport, and run its OAuth flow.
+
+## Local verification
+
+The connector lifecycle was exercised end to end on one machine, with no public origin and no ChatGPT. This
+proves the Hub and daemon side only. **Dotty compatibility: not yet verified.**
+
+Run it with `PASEO_E2E_WORKTREE=<paseo checkout> npm run test:e2e:hub:connector`
+(`src/e2e/hub-paseo-connector.e2e.test.ts`). It needs Docker for PostgreSQL, a current `npm run build`, the
+`claude` CLI, and Playwright's Chromium. The harness starts its own PostgreSQL container, the built self-hosted
+production runtime behind a local reverse proxy (`http://127.0.0.1:<port>`), and a source-built Paseo daemon
+with its own `PASEO_HOME` and listen port, enrolled with `hub.execute`. It never touches another daemon.
+
+| Item            | Tested                                                                                                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Hub             | 0.10.0, branch `feat/dotty-connector` after `66502cc`, PostgreSQL 17                                                                                   |
+| Paseo daemon    | 0.10.0, source commit `2c9b09e4a9`                                                                                                                     |
+| Agent provider  | `claude` (Claude Code 2.1.285), model `claude-haiku-4-5` chosen from `list_runtimes`                                                                   |
+| Transport       | MCP Streamable HTTP, stateless JSON responses, `@modelcontextprotocol/sdk` 1.30.0 client                                                               |
+| Account linking | Dynamic registration, Hub sign-in on `/oauth/connect`, machine and directory selection, consent in Chromium, PKCE `S256` code exchange with `resource` |
+
+Every step passed (9 of 9, about 55 s on 2026-09-30):
+
+1. Both well-known documents name the origin and resource. A request without a valid token gets `401` with the
+   `resource_metadata` challenge. `tools/list` returns exactly the seven tools. `get_connection` shows the
+   selected machine online and the selected directory; `list_runtimes` shows `claude` ready.
+2. `start_agent` was accepted. Paseo itself reports the agent as a `claude` agent whose working directory is the
+   linked directory.
+3. `get_agent` returned the agent's exact final answer.
+4. `send_agent_message` was accepted, and the same session answered it after its first answer.
+5. Replaying the launch's request key returned the same operation and agent; Paseo holds exactly one agent from it.
+6. `cancel_agent` interrupted a running answer partway (at about 170 of 3,000 lines). The agent went idle, wrote
+   nothing more, and its session stayed in Paseo, not archived.
+7. An agent started directly on the daemon, in the same directory, never appeared in `list_agents`.
+   `get_agent`, `send_agent_message` and `cancel_agent` on it all returned `not_found`, and the refused message
+   never reached it.
+8. After a Hub restart on the same database, `list_agents` and `get_agent` still resolved the owned agents.
+9. With the daemon's Hub connection cut, `get_connection` reported it offline, `get_agent` and `start_agent`
+   failed with `machine_offline`, and no agent was created. It came back online after reconnecting.
+10. Revoking the connection at `/oauth/connections` while an agent was mid-answer made the next MCP request
+    fail with `401` `error="invalid_token"`. Paseo still reported the agent running, then and three seconds later.
+
+Not covered here: a public HTTPS origin, ChatGPT or Dotty, refresh-token exchange, and re-enrolling a daemon.

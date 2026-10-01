@@ -1,4 +1,10 @@
-import { createServer, type IncomingMessage, type Server } from "node:http";
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { z } from "zod";
@@ -30,14 +36,13 @@ export class HubFaultProxy {
   >();
   private readonly events: string[] = [];
   private connectionGeneration = 0;
+  private daemonReachable = true;
 
   private constructor(
     private readonly targetOrigin: string,
     readonly origin: string,
   ) {
-    this.server = createServer((request, response) => {
-      void this.forwardHttp(request, response);
-    });
+    this.server = createServer((request, response) => this.forwardHttp(request, response));
     this.sockets.on("headers", (headers, request) => {
       if (request.headers["x-paseo-session-protocol"] === "1") {
         headers.push("x-paseo-session-protocol: 1");
@@ -179,31 +184,51 @@ export class HubFaultProxy {
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
-  private async forwardHttp(
-    request: IncomingMessage,
-    response: import("node:http").ServerResponse,
-  ): Promise<void> {
-    try {
-      const body = await readRequestBody(request);
-      const upstream = await fetch(new URL(request.url ?? "/", this.targetOrigin), {
-        method: request.method ?? "GET",
-        headers: forwardedHeaders(request),
-        ...(body.length === 0 ? {} : { body: new Uint8Array(body) }),
-      });
-      this.events.push(`http ${request.method ?? "GET"} ${request.url ?? "/"} ${upstream.status}`);
-      response.statusCode = upstream.status;
-      upstream.headers.forEach((value, name) => {
-        if (name !== "content-length" && name !== "content-encoding")
-          response.setHeader(name, value);
-      });
-      response.end(Buffer.from(await upstream.arrayBuffer()));
-    } catch (error) {
+  /**
+   * Relays the request and response bytes unchanged, as a reverse proxy does. A fetch-based relay
+   * would follow redirects and stamp its own fetch metadata (`sec-fetch-mode: cors`) over the
+   * browser's, turning a top-level navigation into what looks like a script fetch.
+   */
+  private forwardHttp(request: IncomingMessage, response: ServerResponse): void {
+    const method = request.method ?? "GET";
+    const path = new URL(request.url ?? "/", this.origin).pathname;
+    const target = new URL(request.url ?? "/", this.targetOrigin);
+    const upstream = httpRequest(
+      target,
+      { method, headers: { ...request.headers, host: target.host } },
+      (upstreamResponse) => {
+        this.events.push(`http ${method} ${path} ${upstreamResponse.statusCode ?? 0}`);
+        response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers);
+        upstreamResponse.pipe(response);
+      },
+    );
+    upstream.on("error", (error) => {
+      this.events.push(`http ${method} ${path} proxy error ${error.message}`);
+      if (response.headersSent) {
+        response.destroy();
+        return;
+      }
       response.statusCode = 502;
-      response.end(error instanceof Error ? error.message : String(error));
+      response.end(error.message);
+    });
+    request.pipe(upstream);
+  }
+
+  /** While unreachable, the daemon's Hub socket is dropped and every reconnect is refused. */
+  setDaemonReachable(reachable: boolean): void {
+    this.daemonReachable = reachable;
+    if (!reachable) {
+      this.daemonSocket?.terminate();
+      this.hubSocket?.terminate();
     }
   }
 
   private upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    if (!this.daemonReachable) {
+      this.events.push("daemon refused: unreachable");
+      socket.destroy();
+      return;
+    }
     this.sockets.handleUpgrade(request, socket, head, (daemonSocket) => {
       const generation = ++this.connectionGeneration;
       this.events.push(
@@ -351,15 +376,6 @@ function forwardedHeaders(request: IncomingMessage): Record<string, string> {
     headers[name] = Array.isArray(value) ? value.join(", ") : value;
   }
   return headers;
-}
-
-async function readRequestBody(request: IncomingMessage): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const rawChunk of request) {
-    const chunk: unknown = rawChunk;
-    if (typeof chunk === "string" || chunk instanceof Uint8Array) chunks.push(Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
 }
 
 function readText(data: RawData): string {

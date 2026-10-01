@@ -109,6 +109,8 @@ interface ManagedChild {
 
 interface HubE2EOptions {
   realAgent?: boolean;
+  /** Serve requests with the built self-hosted production runtime instead of the test composition. */
+  productionRuntime?: boolean;
 }
 
 export interface SourceCliBundleDeploymentEvidence {
@@ -328,12 +330,15 @@ export class HubE2E {
     };
   }
 
-  async createUnrelatedLocalAgent(): Promise<string> {
+  async createUnrelatedLocalAgent(
+    prompt = "local unrelated activity",
+    provider = "hub-e2e",
+  ): Promise<string> {
     const result = await this.cli([
       "run",
-      "local unrelated activity",
+      prompt,
       "--provider",
-      "hub-e2e",
+      provider,
       "--detach",
       "--cwd",
       this.workspace,
@@ -1019,6 +1024,79 @@ export class HubE2E {
     await this.requireSource().disconnect();
   }
 
+  /** The public Hub origin every client, browser and daemon uses. */
+  get publicOrigin(): string {
+    return this.requireProxy().origin;
+  }
+
+  /** The throwaway git directory on the daemon's machine that agents may run in. */
+  get workspaceDirectory(): string {
+    return this.workspace;
+  }
+
+  /** The enrolled daemon's machine name, as Hub lists it. */
+  async daemonSlug(daemonId: string): Promise<string> {
+    const result = await this.requirePool().query<{ slug: string }>(
+      "select slug from daemons where id = $1",
+      [daemonId],
+    );
+    return requiredString({ slug: result.rows[0]?.slug }, "slug");
+  }
+
+  /** Makes an existing account a member of the seeded organization the daemon is enrolled in. */
+  async addSeededOrganizationMember(email: string): Promise<void> {
+    const result = await this.requirePool().query(
+      `insert into member (id, organization_id, user_id, role, created_at)
+       select 'hub-e2e-member-' || u.id, 'hub-e2e', u.id, 'member', now()
+       from "user" u where u.email = $1`,
+      [email],
+    );
+    if (result.rowCount !== 1) throw new Error("Seeded organization membership was not added");
+  }
+
+  /** Restarts the Hub process on the same database, then waits for the daemon to reconnect. */
+  async restartHubAndReconnect(): Promise<void> {
+    const proxy = this.requireProxy();
+    const connectionsBefore = proxy.connectionCount();
+    await this.restartHub();
+    await this.observe(
+      async () => proxy.connectionCount() > connectionsBefore && proxy.hubConnectionIsOpen(),
+      "daemon to reconnect to the restarted Hub",
+      90_000,
+    );
+    await this.daemonIsConnected();
+  }
+
+  /** Cuts the daemon off from Hub, or lets it reconnect, without touching the daemon itself. */
+  setDaemonReachable(reachable: boolean): void {
+    this.requireProxy().setDaemonReachable(reachable);
+  }
+
+  /** Waits until the daemon's Hub socket is open through the proxy again. */
+  async daemonReconnected(): Promise<void> {
+    await this.observe(
+      async () => this.requireProxy().hubConnectionIsOpen(),
+      "daemon to reconnect to Hub",
+      120_000,
+    );
+    await this.daemonIsConnected();
+  }
+
+  /** The daemon's own view of an agent, read on the daemon, not through Hub. */
+  inspectDaemonAgent(agentId: string): Promise<Record<string, unknown>> {
+    return this.requireSource().inspectAgent(agentId);
+  }
+
+  /** Every agent the daemon holds, read on the daemon, not through Hub. */
+  daemonAgents(): Promise<Record<string, unknown>[]> {
+    return this.requireSource().listAgents();
+  }
+
+  /** Every item of an agent's daemon-side timeline. */
+  daemonAgentTimeline(agentId: string): Promise<unknown[]> {
+    return this.requireSource().canonicalAgentTimeline(agentId);
+  }
+
   async beginCredentialRun() {
     await rm(this.completionGate, { force: true });
     const run = await this.runManual("credential-restart", "recovery", "credential-restart");
@@ -1411,6 +1489,7 @@ export class HubE2E {
         PASEO_BOOTSTRAP_OWNER_EMAIL: "",
         PASEO_BOOTSTRAP_OWNER_PASSWORD: "",
         HUB_E2E_OUTPUT_FILE: this.outputFile,
+        ...(this.options.productionRuntime === true ? { HUB_E2E_PRODUCTION_RUNTIME: "1" } : {}),
       },
     });
   }
