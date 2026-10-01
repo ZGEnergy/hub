@@ -64,7 +64,7 @@ export class BillingForbiddenError extends Error {
   }
 }
 
-/** The Paseo connector: 503 without a database, 404 when the public origin is neither HTTPS nor
+/** The Paseo Agent Connector: 503 without a database, 404 when the public origin is neither HTTPS nor
  * loopback, otherwise its OAuth surface, the database its authorization reads, and the owned-agent
  * service that reaches daemons through the app's own connection resolver. */
 export type PaseoConnectorAccess =

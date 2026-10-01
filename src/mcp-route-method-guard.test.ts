@@ -20,10 +20,10 @@ interface McpRouteMethodHandlers {
 // or a 500 for a real one once it hit `handleExecutionCapabilities`. A 500
 // makes MCP Streamable HTTP clients treat the server as dead instead of
 // retrying with the one method it actually supports.
-// The Paseo connector endpoint is stateless and POST-only for the same reason.
+// The Paseo Agent Connector endpoint is stateless and POST-only for the same reason.
 describe.each([
   ["execution capability", ExecutionMcpRoute],
-  ["Paseo connector", PaseoConnectorMcpRoute],
+  ["Paseo Agent Connector", PaseoConnectorMcpRoute],
 ] as const)("the %s MCP route", (_name, route) => {
   it("rejects GET on the MCP route with 405 and an Allow: POST header", async () => {
     // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- the generated route type cannot express calling one handler directly

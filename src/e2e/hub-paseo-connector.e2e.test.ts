@@ -8,14 +8,16 @@ import { z } from "zod";
 import { HubE2E } from "./harness/index.js";
 
 /**
- * The OAuth-linked Paseo connector end to end: the built self-hosted Hub, a source-built Paseo
+ * The OAuth-linked Paseo Agent Connector end to end: the built self-hosted Hub, a source-built Paseo
  * daemon enrolled in it, and real Claude agents. The token comes from Hub's own OAuth endpoints
  * and screens driven in Chromium; every tool call goes through the official MCP client.
  */
 const describeConnector = process.env["RUN_HUB_CONNECTOR_E2E"] === "1" ? describe : describe.skip;
 
 /** Never served: the browser's navigation to it is intercepted, as a client's callback would be. */
-const REDIRECT_URI = "https://chatgpt.example/connector/oauth_callback";
+const REDIRECT_URI = "https://client.example/oauth/callback";
+/** The name the client registers; the consent page shows it as the app asking for access. */
+const CLIENT_NAME = "Example MCP Client";
 const SCOPES = "paseo:read paseo:run paseo:cancel offline_access";
 const TOOLS = [
   "cancel_agent",
@@ -83,7 +85,7 @@ interface ToolResult {
   text: string;
 }
 
-describeConnector("Paseo connector against a real daemon and real agents", () => {
+describeConnector("Paseo Agent Connector against a real daemon and real agents", () => {
   let hub: HubE2E;
   let browser: Browser;
   let page: Page;
@@ -146,7 +148,7 @@ describeConnector("Paseo connector against a real daemon and real agents", () =>
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        client_name: "Connector E2E",
+        client_name: CLIENT_NAME,
         redirect_uris: [REDIRECT_URI],
         token_endpoint_auth_method: "none",
         grant_types: ["authorization_code", "refresh_token"],
@@ -211,6 +213,7 @@ describeConnector("Paseo connector against a real daemon and real agents", () =>
     const decision = page.getByRole("group", { name: "Decision" });
     await decision.waitFor({ timeout: 30_000 });
     await page.getByText(workingDirectory, { exact: true }).waitFor();
+    await page.getByText(CLIENT_NAME, { exact: true }).waitFor();
     await decision.getByRole("button", { name: "Approve" }).click();
 
     const returned = await callback;

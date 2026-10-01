@@ -111,7 +111,7 @@ interface HubE2EOptions {
   realAgent?: boolean;
   /** Serve requests with the built self-hosted production runtime instead of the test composition. */
   productionRuntime?: boolean;
-  /** Opt the Hub child in to the Paseo connector (`PASEO_HUB_PASEO_CONNECTOR=enabled`). */
+  /** Opt the Hub child in to the Paseo Agent Connector (`PASEO_HUB_PASEO_CONNECTOR=enabled`). */
   paseoConnector?: boolean;
 }
 
@@ -1047,7 +1047,7 @@ export class HubE2E {
 
   /**
    * Makes an existing account an admin of the seeded organization the daemon is enrolled in:
-   * linking a machine to the Paseo connector needs a role that manages resources.
+   * linking a machine to the Paseo Agent Connector needs a role that manages resources.
    */
   async addSeededOrganizationAdmin(email: string): Promise<void> {
     const result = await this.requirePool().query(

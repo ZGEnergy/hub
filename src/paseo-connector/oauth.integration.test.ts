@@ -37,7 +37,8 @@ import { Route as ProtectedResourceRoute } from "../routes/[.]well-known/oauth-p
 const ORIGIN = "http://localhost:3000";
 const RESOURCE = `${ORIGIN}/mcp/paseo`;
 const CONNECTION_CLAIM = `${ORIGIN}/claims/paseo-connection`;
-const REDIRECT_URI = "https://chatgpt.example/connector/oauth_callback";
+const CLIENT_NAME = "Example MCP Client";
+const REDIRECT_URI = "https://client.example/oauth/callback";
 const ENDPOINTS = connectorOAuthEndpoints(ORIGIN)!;
 
 let postgres: StartedPostgreSqlContainer;
@@ -59,9 +60,10 @@ const oauthErrorSchema = z.object({ error: z.string() }).passthrough();
 
 describe("consent redirect destination", () => {
   it("never shows a custom scheme's opaque origin", () => {
-    expect(redirectDestination("https://chatgpt.com/connector/oauth/cb?x=1")).toBe(
-      "https://chatgpt.com",
+    expect(redirectDestination("https://client.example/oauth/callback?x=1")).toBe(
+      "https://client.example",
     );
+    expect(redirectDestination("http://127.0.0.1:43117/callback")).toBe("http://127.0.0.1:43117");
     expect(redirectDestination("myapp://callback/path")).toBe("myapp://callback");
     expect(redirectDestination("com.example.app:/oauth")).toBe("com.example.app:");
     expect(redirectDestination("not a url")).toBeNull();
@@ -69,7 +71,7 @@ describe("consent redirect destination", () => {
   });
 });
 
-describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", (kind) => {
+describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on %s", (kind) => {
   let root: string;
   let bundle: DatabaseRuntimeBundle;
   let database: Database;
@@ -236,7 +238,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          client_name: "Dotty",
+          client_name: CLIENT_NAME,
           redirect_uris: [REDIRECT_URI],
           token_endpoint_auth_method: "none",
           grant_types: ["authorization_code", "refresh_token"],
@@ -332,6 +334,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
     expect(served).not.toHaveProperty("introspection_endpoint_auth_methods_supported");
     expect(await connector.protectedResourceMetadata().json()).toEqual({
       resource: RESOURCE,
+      resource_name: "Paseo Agent Connector",
       authorization_servers: [ORIGIN],
       scopes_supported: ["paseo:read", "paseo:run", "paseo:cancel"],
       bearer_methods_supported: ["header"],
@@ -819,7 +822,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
     );
 
     expect(await connector.describeConsent(consent, browser.headers())).toEqual({
-      clientName: "Dotty",
+      clientName: CLIENT_NAME,
       redirectTarget: new URL(REDIRECT_URI).origin,
       machineName: `devbox-${machine.slice(0, 8)}`,
       organizationName: "Acme",

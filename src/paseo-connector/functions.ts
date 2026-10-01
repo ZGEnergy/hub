@@ -4,7 +4,7 @@ import { z } from "zod";
 import { respondOk, type Result } from "../contract/respond.js";
 import { respondWithFailure, type FailureKind } from "../failures/index.js";
 import { getApplication } from "../server/runtime.js";
-import { ConnectorError } from "./contracts.js";
+import { CONNECTOR_PRODUCT_NAME, ConnectorError, RESTART_FROM_CLIENT } from "./contracts.js";
 import {
   ConnectorFlowError,
   type ConnectorConnectionSummary,
@@ -124,7 +124,7 @@ function connectionView(connection: ConnectorConnectionSummary): ConnectorConnec
 
 class ConnectorUnavailableError extends Error {
   constructor(readonly status: "database_unavailable" | "disabled") {
-    super(`paseo connector ${status}`);
+    super(`${CONNECTOR_PRODUCT_NAME} ${status}`);
     this.name = "ConnectorUnavailableError";
   }
 }
@@ -134,8 +134,6 @@ async function enabledConnector(): Promise<ConnectorOAuthService> {
   if (connector.status !== "enabled") throw new ConnectorUnavailableError(connector.status);
   return connector.oauth;
 }
-
-const RETRY_FROM_CHATGPT = "Start connecting again from ChatGPT.";
 
 function connectorFailure(error: unknown, operation: string) {
   const [kind, message] = failureMessage(error);
@@ -150,7 +148,7 @@ function connectorFailure(error: unknown, operation: string) {
 function failureMessage(error: unknown): [FailureKind, string] {
   if (error instanceof ConnectorUnavailableError) {
     return error.status === "disabled"
-      ? ["notFound", "The Paseo connector is not enabled on this Hub."]
+      ? ["notFound", `The ${CONNECTOR_PRODUCT_NAME} is not enabled on this Hub.`]
       : ["upstreamUnavailable", "Hub's database is unavailable. Try again shortly."];
   }
   if (error instanceof ConnectorFlowError) {
@@ -160,9 +158,9 @@ function failureMessage(error: unknown): [FailureKind, string] {
       case "invalid_request":
         return ["validation", `${error.message}.`];
       case "flow_not_found":
-        return ["notFound", `This authorization is no longer pending. ${RETRY_FROM_CHATGPT}`];
+        return ["notFound", `This authorization is no longer pending. ${RESTART_FROM_CLIENT}`];
       case "authorization_failed":
-        return ["validation", `Hub couldn't continue this authorization. ${RETRY_FROM_CHATGPT}`];
+        return ["validation", `Hub couldn't continue this authorization. ${RESTART_FROM_CLIENT}`];
     }
   }
   if (error instanceof ConnectorError) {

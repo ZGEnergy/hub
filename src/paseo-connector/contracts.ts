@@ -7,6 +7,12 @@ export type ConnectorScope = (typeof CONNECTOR_SCOPES)[number];
 /** The browser carries the flow id beside, never inside, the library's signed query. */
 export const CONNECTOR_FLOW_PARAM = "connector_flow";
 
+/** The product name every client sees, whichever vendor's MCP client is calling. */
+export const CONNECTOR_PRODUCT_NAME = "Paseo Agent Connector";
+
+/** What to do when an authorization request can no longer be continued. */
+export const RESTART_FROM_CLIENT = "Start connecting again from your MCP client.";
+
 /** The four columns that together prove who may touch a connector resource. */
 export interface Identity {
   connectionId: string;

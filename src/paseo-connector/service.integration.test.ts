@@ -379,7 +379,7 @@ afterAll(async () => {
   await postgres?.stop();
 });
 
-describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s", (kind) => {
+describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector service on %s", (kind) => {
   let root: string;
   let bundle: DatabaseRuntimeBundle;
   let database: Database;
@@ -1283,7 +1283,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
   });
 });
 
-describe("Paseo connector service across a restart", () => {
+describe("Paseo Agent Connector service across a restart", () => {
   it("still resolves owned agents after the embedded database is closed and reopened", async () => {
     const root = await mkdtemp(join(tmpdir(), "hub-connector-restart-"));
     let bundle = await embeddedDatabaseRuntime(join(root, "database"));
@@ -1324,7 +1324,7 @@ describe("Paseo connector service across a restart", () => {
   }, 120_000);
 });
 
-describe("Paseo connector service wiring", () => {
+describe("Paseo Agent Connector service wiring", () => {
   it("is built on the application's daemon resolver, including its test injection", async () => {
     const root = await mkdtemp(join(tmpdir(), "hub-connector-wiring-"));
     const bundle = await embeddedDatabaseRuntime(join(root, "database"));

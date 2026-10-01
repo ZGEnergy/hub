@@ -7,7 +7,12 @@ import { jwt } from "better-auth/plugins";
 import type { DatabaseRuntime } from "../db/runtime/index.js";
 import type { Database } from "../db/types.js";
 import { loadCurrentConnection, type ConnectorPrincipal } from "./authorization.js";
-import { CONNECTOR_SCOPES, ConnectorError, type ConsentFlow } from "./contracts.js";
+import {
+  CONNECTOR_PRODUCT_NAME,
+  CONNECTOR_SCOPES,
+  ConnectorError,
+  type ConsentFlow,
+} from "./contracts.js";
 
 export const CONNECTOR_RESOURCE_PATH = "/mcp/paseo";
 export const CONNECTOR_CONNECT_PAGE = "/oauth/connect";
@@ -261,6 +266,7 @@ export function connectorOAuthPlugins(endpoints: ConnectorOAuthEndpoints, databa
 export function protectedResourceMetadata(endpoints: ConnectorOAuthEndpoints) {
   return {
     resource: endpoints.resource,
+    resource_name: CONNECTOR_PRODUCT_NAME,
     authorization_servers: [endpoints.issuer],
     scopes_supported: [...CONNECTOR_SCOPES],
     bearer_methods_supported: ["header"],

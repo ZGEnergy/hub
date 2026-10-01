@@ -48,7 +48,7 @@ import {
   protectedResourceMetadata,
   verifyConnectorAccessToken,
 } from "../paseo-connector/oauth.js";
-import { ConnectorError } from "../paseo-connector/contracts.js";
+import { CONNECTOR_PRODUCT_NAME, ConnectorError } from "../paseo-connector/contracts.js";
 import { reportFailure } from "../failures/index.js";
 import {
   ConnectorFlowError,
@@ -96,7 +96,7 @@ export interface AuthServer {
   cliCredentials?: OrganizationCliCredentials;
   publicCredentials?: PublicCredentialAuthenticator;
   /**
-   * The Paseo connector's OAuth surface; absent unless the operator enabled it and the public
+   * The Paseo Agent Connector's OAuth surface; absent unless the operator enabled it and the public
    * origin is HTTPS or loopback.
    */
   connector?: ConnectorOAuthService;
@@ -125,7 +125,7 @@ export interface AuthServerOptions {
   /** Optional account email delivery. Configured public instances require verification. */
   accountMailer?: AccountMailer;
   /**
-   * The operator's explicit opt-in to the Paseo connector (`PASEO_HUB_PASEO_CONNECTOR=enabled`).
+   * The operator's explicit opt-in to the Paseo Agent Connector (`PASEO_HUB_PASEO_CONNECTOR=enabled`).
    * Off by default: no OAuth provider, no client registration, no connector routes.
    */
   paseoConnector?: boolean;
@@ -577,7 +577,10 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     const form = new URLSearchParams(await request.text());
     const resources = form.getAll("resource");
     if (resources.length !== 1 || resources[0] !== connectorEndpoints?.resource) {
-      return tokenRequestError("invalid_target", "resource must be the Paseo connector");
+      return tokenRequestError(
+        "invalid_target",
+        `resource must be the ${CONNECTOR_PRODUCT_NAME} MCP endpoint`,
+      );
     }
     if (form.get("grant_type") === "refresh_token") {
       const refused = await refreshGrantRefusal(form.get("refresh_token"));

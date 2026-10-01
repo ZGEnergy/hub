@@ -46,7 +46,7 @@ export interface RuntimeConfig {
   bind: string;
   trustedClientIpHeader?: string;
   authPolicy: InstanceAuthPolicy;
-  /** `PASEO_HUB_PASEO_CONNECTOR=enabled`: the operator opted in to the Paseo connector. */
+  /** `PASEO_HUB_PASEO_CONNECTOR=enabled`: the operator opted in to the Paseo Agent Connector. */
   paseoConnector: boolean;
 }
 

@@ -19,7 +19,7 @@ import { SummaryPanel, type SummaryRow } from "../components/app/summary-panel.j
 import { TwoLine } from "../components/app/two-line.js";
 import { Button } from "../components/ui/button.js";
 import type { Result } from "../contract/respond.js";
-import { CONNECTOR_FLOW_PARAM, type ConnectorScope } from "./contracts.js";
+import { CONNECTOR_FLOW_PARAM, RESTART_FROM_CLIENT, type ConnectorScope } from "./contracts.js";
 import type { ConnectorConsentSummary, ConnectorMachine, ConnectorRedirect } from "./flow.js";
 import {
   decidePaseoConnectorConsent,
@@ -48,7 +48,6 @@ const SCOPES: Record<ConnectorScope, { label: string; description: string }> = {
   },
 };
 
-const RESTART = "Start connecting again from ChatGPT.";
 const CONNECTIONS_PATH = "/oauth/connections";
 
 /**
@@ -110,8 +109,8 @@ function UnusableRequest({
   );
 }
 
-const MISSING_REQUEST = `This page needs the authorization request ChatGPT sends when you connect Paseo. ${RESTART}`;
-const EXPIRED_REQUEST = `This authorization request expired. ${RESTART}`;
+const MISSING_REQUEST = `This page needs the authorization request an MCP client sends when it connects to the Paseo Agent Connector. ${RESTART_FROM_CLIENT}`;
+const EXPIRED_REQUEST = `This authorization request expired. ${RESTART_FROM_CLIENT}`;
 
 function machineOption(machine: ConnectorMachine): ComboboxOption {
   let state = "Not allowed to run Hub automations";
@@ -127,11 +126,11 @@ function machineOption(machine: ConnectorMachine): ComboboxOption {
 
 const CONNECT_TITLE = "Connect a machine";
 const CONNECT_DESCRIPTION =
-  "Choose the one machine and working directory this connection may use. You approve what it can do on the next step.";
+  "Choose the one machine and working directory this Paseo Agent Connector connection may use. You approve what it can do on the next step.";
 const NO_MACHINES = {
   title: "No machines to connect",
   description:
-    "Only owners and admins can connect an organization's machines. Enroll a Paseo daemon in an organization you manage, then start connecting again from ChatGPT.",
+    "Only owners and admins can connect an organization's machines to the Paseo Agent Connector. Enroll a Paseo daemon in an organization you manage, then start connecting again from your MCP client.",
 };
 const MACHINES_FAILURE = "Hub did not return your machines. Check your connection and try again.";
 const SELECT_FAILURE =
@@ -302,7 +301,7 @@ export function ConnectorConnect() {
 
 const CONSENT_TITLE = "Approve access";
 const CONSENT_DESCRIPTION =
-  "Review what this app may do with Paseo on the machine you chose, then approve or deny it.";
+  "Review what this app may do through the Paseo Agent Connector on the machine you chose, then approve or deny it.";
 const CONSENT_FAILURE = "Hub did not return this authorization. Check your connection and reload.";
 const DECISION_FAILURE =
   "Hub did not receive your decision. Check your connection and submit again.";
@@ -478,7 +477,8 @@ const CONNECTION_COLUMNS = [
 ];
 const NO_CONNECTIONS = {
   title: "No connections",
-  description: "Connect Paseo from ChatGPT and the connection appears here.",
+  description:
+    "Connect an MCP client to the Paseo Agent Connector and the connection appears here.",
 };
 const CONNECTIONS_FAILURE =
   "Hub did not return your connections. Check your connection and reload.";
@@ -509,7 +509,7 @@ export function ConnectorConnections() {
   const header = (
     <PageHeader
       title="Connected apps"
-      description="Apps you connected to Paseo, each limited to one machine and one working directory. Revoking one blocks its further access but does not stop agents already running."
+      description="Apps you connected through the Paseo Agent Connector, each limited to one machine and one working directory. Revoking one blocks its further access but does not stop agents already running."
     />
   );
   if (connections.isPending) {
