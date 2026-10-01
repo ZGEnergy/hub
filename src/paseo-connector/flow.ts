@@ -149,23 +149,28 @@ export async function selectConnectorMachine(
     expiresAt: new Date(Math.min(signedExpiry, now.getTime() + FLOW_LIFETIME_MS)),
     consumedAt: null,
   };
-  await context.database.connector.createFlow(flow);
-
-  const next = await withConsentFlow(flow, () =>
-    context.authorize("continue", { postLogin: true, oauth_query: oauthQuery }),
-  );
-  const consent = new URL(next, "http://hub.invalid");
-  if (consent.pathname !== CONNECTOR_CONSENT_PAGE) {
-    throw new ConnectorFlowError("authorization_failed", "authorization did not reach consent");
+  try {
+    await context.database.connector.createFlow(flow);
+    const next = await withConsentFlow(flow, () =>
+      context.authorize("continue", { postLogin: true, oauth_query: oauthQuery }),
+    );
+    const consent = new URL(next, "http://hub.invalid");
+    if (consent.origin !== "http://hub.invalid" || consent.pathname !== CONNECTOR_CONSENT_PAGE) {
+      throw new ConnectorFlowError("authorization_failed", "authorization did not reach consent");
+    }
+    consent.searchParams.set(CONNECTOR_FLOW_PARAM, flow.id);
+    return { redirectTo: `${consent.pathname}${consent.search}` };
+  } catch (error) {
+    // A rejected signature or any other continue failure leaves nothing pending behind.
+    await context.database.connector.discardPendingConnection(userId, connectionId);
+    throw error;
   }
-  consent.searchParams.set(CONNECTOR_FLOW_PARAM, flow.id);
-  return { redirectTo: `${consent.pathname}${consent.search}` };
 }
 
 /**
  * Records the user's consent decision for the flow they selected in this session. Approval issues
  * the authorization code and activates the connection in the same step that consumes the flow;
- * denial returns the library's access_denied redirect and leaves the connection inactive.
+ * denial returns the library's access_denied redirect and discards the never-activated connection.
  */
 export async function decideConnectorConsent(
   context: ConnectorFlowContext,
@@ -184,11 +189,12 @@ export async function decideConnectorConsent(
     throw new ConnectorFlowError("flow_not_found", "this authorization is no longer pending");
   }
   if (!input.accept) {
-    return {
-      redirectTo: await withConsentFlow(flow, () =>
-        context.authorize("consent", { accept: false, oauth_query: oauthQuery }),
-      ),
-    };
+    const denied = await withConsentFlow(flow, () =>
+      context.authorize("consent", { accept: false, oauth_query: oauthQuery }),
+    );
+    // Denial is final: the pending connection and its flow are gone, so nothing can accept later.
+    await context.database.connector.discardPendingConnection(userId, flow.connectionId);
+    return { redirectTo: denied };
   }
   const connection = await context.database.connector.findConnection(userId, flow.connectionId);
   if (
@@ -308,13 +314,14 @@ function requestedConnectorScopes(params: URLSearchParams): ConnectorScope[] {
 function explicitWorkingDirectory(value: string): string {
   if (
     !value.startsWith("/") ||
-    value.includes("\0") ||
+    // oxlint-disable-next-line no-control-regex -- control characters are exactly what is rejected
+    /[\u0000-\u001f\u007f]/.test(value) ||
     value.length > MAX_WORKING_DIRECTORY_LENGTH ||
     value.split("/").includes("..")
   ) {
     throw new ConnectorFlowError(
       "invalid_request",
-      "the working directory must be an absolute path without '..'",
+      "the working directory must be an absolute path without '..' or control characters",
     );
   }
   const normalized = posix.normalize(value);

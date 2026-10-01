@@ -65,6 +65,16 @@ export class MemoryConnectorStore implements ConnectorStore {
     return true;
   }
 
+  async discardPendingConnection(ownerUserId: string, id: string) {
+    const connection = this.connections.get(id);
+    if (connection?.ownerUserId !== ownerUserId || connection.activatedAt !== null) return false;
+    this.connections.delete(id);
+    for (const [flowId, flow] of this.flows) {
+      if (flow.connectionId === id) this.flows.delete(flowId);
+    }
+    return true;
+  }
+
   async createFlow(input: ConsentFlow) {
     const connection = this.connections.get(input.connectionId);
     if (connection?.ownerUserId !== input.ownerUserId) throw new Error("unknown connection");

@@ -87,6 +87,11 @@ export interface ConnectorStore {
   listConnections(ownerUserId: string): Promise<readonly ConnectorConnection[]>;
   /** Never contacts the daemon. False when missing, foreign, or already revoked. */
   revokeConnection(ownerUserId: string, id: string, now: Date): Promise<boolean>;
+  /**
+   * Deletes a connection that never completed consent, with its flows. False, with nothing
+   * changed, when it is missing, foreign, or already activated.
+   */
+  discardPendingConnection(ownerUserId: string, id: string): Promise<boolean>;
   createFlow(input: ConsentFlow): Promise<void>;
   findFlow(ownerUserId: string, sessionId: string, id: string): Promise<ConsentFlow | undefined>;
   /**

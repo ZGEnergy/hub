@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
+import { createApplicationRuntime } from "../application-runtime.js";
 import { composeEntitlements } from "../auth/entitlements.js";
 import { createAuthServer, type AuthServer } from "../auth/server.js";
 import { createDatabase } from "../db/pg.js";
@@ -18,6 +19,9 @@ import { authorizeConnectorRequest } from "./authorization.js";
 import { ConnectorError } from "./contracts.js";
 import { CONNECTOR_FLOW_PARAM, ConnectorFlowError, type ConnectorOAuthService } from "./flow.js";
 import { connectorOAuthEndpoints, verifyConnectorAccessToken } from "./oauth.js";
+import { startApplication, stopApplication } from "../server/runtime.js";
+import { Route as AuthorizationServerRoute } from "../routes/[.]well-known/oauth-authorization-server.js";
+import { Route as ProtectedResourceRoute } from "../routes/[.]well-known/oauth-protected-resource/mcp/paseo.js";
 
 const ORIGIN = "http://localhost:3000";
 const RESOURCE = `${ORIGIN}/mcp/paseo`;
@@ -86,7 +90,10 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
     return { browser, organizationId, machine, otherMachine };
   }
 
-  async function enroll(organizationId: string): Promise<string> {
+  async function enroll(
+    organizationId: string,
+    permissions: string[] = ["hub.execute"],
+  ): Promise<string> {
     const verifier = `token-${randomUUID()}`;
     await database.issueEnrollmentToken({
       id: randomUUID(),
@@ -104,7 +111,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
       serverId: randomUUID(),
       daemonPublicKey: "public",
       credentialVerifier: "credential",
-      permissions: ["hub.execute"],
+      permissions,
       now: new Date(),
     });
     return daemonId;
@@ -213,14 +220,26 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
         }),
       }),
     );
-    // The pinned library answers a successful registration with 200, not RFC 7591's 201.
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(201);
+    expect(response.headers.get("cache-control")).toBe("no-store");
     const client = z
       .object({ client_id: z.string(), token_endpoint_auth_method: z.literal("none") })
       .passthrough()
       .parse(await response.json());
     expect(client).not.toHaveProperty("client_secret");
     return client.client_id;
+  }
+
+  /** Connection and flow rows the user owns, whatever their state. */
+  async function connectorRows(browser: Browser): Promise<number> {
+    const userId = await browser.userId();
+    const result = await bundle.runtime.query<{ count: number }>(
+      `select (select count(*) from connector_connections where owner_user_id = $1)::integer
+            + (select count(*) from connector_consent_flows where owner_user_id = $1)::integer
+              as count`,
+      [userId],
+    );
+    return result.rows[0]!.count;
   }
 
   async function principalOf(tokens: Tokens) {
@@ -377,6 +396,8 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
         browser.headers(),
       ),
     ).rejects.toBeInstanceOf(ConnectorFlowError);
+    // The rejected selection left nothing pending behind.
+    expect(await connectorRows(browser)).toBe(0);
 
     const consent = await select(browser, request.connectQuery, machine);
     const widened = new URLSearchParams(consent.oauthQuery);
@@ -500,6 +521,230 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
     expect(await errorOf(await refresh(clientId, tokens))).toBe("invalid_grant");
   });
 
+  it("mints nothing for a token request the library would read differently from Hub", async () => {
+    const { browser, machine } = await operator();
+    const clientId = await registerClient();
+    const { code, verifier } = await linkMachine(browser, clientId, machine);
+    const grant = {
+      grant_type: "authorization_code",
+      client_id: clientId,
+      code,
+      code_verifier: verifier,
+      redirect_uri: REDIRECT_URI,
+    };
+    const send = (contentType: string, body: string) =>
+      auth.handle(
+        new Request(`${ORIGIN}/api/auth/oauth2/token`, {
+          method: "POST",
+          headers: { "content-type": contentType },
+          body,
+        }),
+      );
+
+    // A JSON body whose raw text also parses as a form carrying the connector resource.
+    const smuggled = await send(
+      "application/x-www-form-urlencoded+json",
+      JSON.stringify({ ...grant, z: `&resource=${RESOURCE}&` }),
+    );
+    expect(smuggled.status).toBe(400);
+    expect("access_token" in z.record(z.string(), z.unknown()).parse(await smuggled.json())).toBe(
+      false,
+    );
+    const json = await send("application/json", JSON.stringify({ ...grant, resource: RESOURCE }));
+    expect(await errorOf(json)).toBe("invalid_request");
+    expect(
+      (
+        await bundle.runtime.query<{ count: number }>(
+          `select (select count(*) from oauth_access_token)::integer
+                + (select count(*) from oauth_refresh_token where client_id = $1)::integer as count`,
+          [clientId],
+        )
+      ).rows[0]!.count,
+    ).toBe(0);
+
+    // A form with parameters on its media type is still the same form, and the code was unspent.
+    const form = await send(
+      "Application/X-WWW-Form-Urlencoded; charset=utf-8",
+      new URLSearchParams({ ...grant, resource: RESOURCE }).toString(),
+    );
+    expect(form.status).toBe(200);
+    expect(jwtClaims(tokenResponseSchema.parse(await form.json()).access_token)["aud"]).toBe(
+      RESOURCE,
+    );
+  });
+
+  it("requires Hub's own browser origin for every connector mutation", async () => {
+    const { browser, machine } = await operator();
+    const clientId = await registerClient();
+    const request = await authorization(browser, clientId);
+    const input = { oauthQuery: request.connectQuery, daemonId: machine, workingDirectory: "/srv" };
+
+    for (const headers of [browser.headers("https://evil.example"), browser.headers(null)]) {
+      await expect(connector.selectMachine(input, headers)).rejects.toThrow("invalid origin");
+    }
+    expect(await connectorRows(browser)).toBe(0);
+
+    const consent = await select(browser, request.connectQuery, machine);
+    await expect(
+      connector.decideConsent(
+        { ...consent, accept: true },
+        browser.headers("https://evil.example"),
+      ),
+    ).rejects.toThrow("invalid origin");
+    await connector.decideConsent({ ...consent, accept: true }, browser.headers());
+    const [connection] = await connector.listConnections(browser.headers());
+
+    await expect(
+      connector.revokeConnection(
+        { connectionId: connection!.connectionId },
+        browser.headers("https://evil.example"),
+      ),
+    ).rejects.toThrow("invalid origin");
+    expect((await connector.listConnections(browser.headers()))[0]!.revokedAt).toBeNull();
+  });
+
+  it("honours a flow only for its own session and user, once, before it expires", async () => {
+    const { browser, machine } = await operator();
+    const clientId = await registerClient();
+    const sameUserOtherSession = new Browser(auth, browser.email);
+    await sameUserOtherSession.signIn();
+    const otherUser = new Browser(auth);
+    await otherUser.signUp();
+    const request = await authorization(browser, clientId);
+    const consent = await select(browser, request.connectQuery, machine);
+
+    for (const other of [sameUserOtherSession, otherUser]) {
+      await expect(
+        connector.decideConsent({ ...consent, accept: true }, other.headers()),
+      ).rejects.toMatchObject({ code: "flow_not_found" });
+    }
+    const approved = await connector.decideConsent({ ...consent, accept: true }, browser.headers());
+    expect(new URL(approved.redirectTo).searchParams.has("code")).toBe(true);
+    await expect(
+      connector.decideConsent({ ...consent, accept: true }, browser.headers()),
+    ).rejects.toMatchObject({ code: "flow_not_found" });
+
+    const late = await select(
+      browser,
+      (await authorization(browser, clientId)).connectQuery,
+      machine,
+    );
+    await bundle.runtime.query(
+      `update connector_consent_flows set expires_at = now() - interval '1 minute' where id = $1`,
+      [late.flowId],
+    );
+    await expect(
+      connector.decideConsent({ ...late, accept: true }, browser.headers()),
+    ).rejects.toMatchObject({ code: "flow_not_found" });
+    expect(await connector.listConnections(browser.headers())).toHaveLength(1);
+  });
+
+  it("makes a denial final: no code, no connection, no later approval", async () => {
+    const { browser, machine } = await operator();
+    const clientId = await registerClient();
+    const request = await authorization(browser, clientId);
+    const consent = await select(browser, request.connectQuery, machine);
+
+    const denied = await connector.decideConsent({ ...consent, accept: false }, browser.headers());
+    const callback = new URL(denied.redirectTo);
+    expect(`${callback.origin}${callback.pathname}`).toBe(REDIRECT_URI);
+    expect(callback.searchParams.get("error")).toBe("access_denied");
+    expect(callback.searchParams.get("state")).toBe(request.state);
+    expect(callback.searchParams.has("code")).toBe(false);
+
+    await expect(
+      connector.decideConsent({ ...consent, accept: true }, browser.headers()),
+    ).rejects.toMatchObject({ code: "flow_not_found" });
+    expect(await connector.listConnections(browser.headers())).toEqual([]);
+    expect(await connectorRows(browser)).toBe(0);
+  });
+
+  it("rejects unusable directories and machines at selection without leaving rows", async () => {
+    const { browser, organizationId, machine } = await operator();
+    const withoutExecute = await enroll(organizationId, []);
+    const outsider = new Browser(auth);
+    await outsider.signUp();
+    const foreignMachine = await enroll(await outsider.createOrganization());
+    const clientId = await registerClient();
+    const request = await authorization(browser, clientId);
+    const attempt = (daemonId: string, workingDirectory: string) =>
+      connector.selectMachine(
+        { oauthQuery: request.connectQuery, daemonId, workingDirectory },
+        browser.headers(),
+      );
+
+    const machines = await connector.listMachines(browser.headers());
+    expect(machines.find(({ daemonId }) => daemonId === withoutExecute)?.canRunHubWork).toBe(false);
+    expect(machines.some(({ daemonId }) => daemonId === foreignMachine)).toBe(false);
+    for (const directory of [
+      "srv/work",
+      "/srv/../etc",
+      "/srv/work\u0007",
+      "/srv/\u007fwork",
+      "/srv\n",
+    ]) {
+      await expect(attempt(machine, directory)).rejects.toMatchObject({ code: "invalid_request" });
+    }
+    await expect(attempt(withoutExecute, "/srv/work")).rejects.toMatchObject({
+      code: "machine_incompatible",
+    });
+    await expect(attempt(foreignMachine, "/srv/work")).rejects.toMatchObject({
+      code: "invalid_request",
+    });
+    expect(await connectorRows(browser)).toBe(0);
+    // The same authorization still selects a usable machine afterwards.
+    expect((await select(browser, request.connectQuery, machine)).flowId).toMatch(/\S/);
+  });
+
+  it("stays disabled on a plain-http public origin and leaves Hub's own auth unchanged", async () => {
+    const origin = "http://hub.example.test";
+    const plain = createAuthServer({
+      database: bundle.runtime,
+      locks: bundle.locks,
+      entitlements: composeEntitlements(database, bundle.runtime).service,
+      secret: "connector-oauth-test-secret-at-least-32-characters",
+      baseURL: origin,
+      policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+    });
+    expect(plain.connector).toBeUndefined();
+    const browser = new Browser(plain, undefined, origin);
+    await browser.signUp();
+    await browser.createOrganization();
+
+    const statuses = await Promise.all(
+      [
+        new Request(`${origin}/api/auth/oauth2/authorize?response_type=code&client_id=x`),
+        new Request(`${origin}/api/auth/jwks`),
+        ...["token", "register", "revoke", "continue", "consent"].map(
+          (path) => new Request(`${origin}/api/auth/oauth2/${path}`, { method: "POST" }),
+        ),
+      ].map(async (request) => (await plain.handle(request)).status),
+    );
+    expect(statuses).toEqual([404, 404, 404, 404, 404, 404, 404]);
+    expect((await plain.handle(browser.request("/api/auth/get-session"))).status).toBe(200);
+
+    await startApplication(() =>
+      createApplicationRuntime({
+        database,
+        auth: plain,
+        entitlements: composeEntitlements(database, bundle.runtime).service,
+        billing: null,
+        close: () => Promise.resolve(),
+      }),
+    );
+    try {
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- the generated route type cannot express calling one handler directly
+      const metadata = AuthorizationServerRoute.options.server?.handlers as unknown as WellKnownGet;
+      // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- as above
+      const resource = ProtectedResourceRoute.options.server?.handlers as unknown as WellKnownGet;
+      const request = new Request(`${origin}/.well-known/oauth-authorization-server`);
+      expect((await metadata.GET({ request })).status).toBe(404);
+      expect((await resource.GET({ request })).status).toBe(404);
+    } finally {
+      await stopApplication();
+    }
+  });
+
   it("accepts only unexpired JWTs from this issuer for this resource", async () => {
     const keys = testSigningKeys();
     const now = Math.floor(Date.now() / 1000);
@@ -528,11 +773,43 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
   });
 });
 
+/** The two well-known routes' GET handlers, called directly. */
+interface WellKnownGet {
+  GET(context: { request: Request }): Response | Promise<Response>;
+}
+
 class Browser {
   private cookie = "";
-  readonly email = `operator-${randomUUID()}@example.com`;
 
-  constructor(private readonly auth: AuthServer) {}
+  constructor(
+    private readonly auth: AuthServer,
+    readonly email = `operator-${randomUUID()}@example.com`,
+    private readonly origin = ORIGIN,
+  ) {}
+
+  async signIn(): Promise<void> {
+    const response = await this.auth.handle(
+      this.post("/api/auth/sign-in/email", { email: this.email, password: "account-password" }),
+    );
+    expect(response.status).toBe(200);
+    this.rememberCookie(response);
+  }
+
+  async userId(): Promise<string> {
+    const response = await this.auth.handle(this.request("/api/auth/get-session"));
+    return z.object({ user: z.object({ id: z.string() }) }).parse(await response.json()).user.id;
+  }
+
+  request(path: string): Request {
+    return new Request(`${this.origin}${path}`, { headers: { cookie: this.cookie } });
+  }
+
+  private rememberCookie(response: Response): void {
+    this.cookie = response.headers
+      .getSetCookie()
+      .map((value) => value.split(";", 1)[0])
+      .join("; ");
+  }
 
   async signUp(): Promise<void> {
     const response = await this.auth.handle(
@@ -543,10 +820,7 @@ class Browser {
       }),
     );
     expect(response.status).toBe(200);
-    this.cookie = response.headers
-      .getSetCookie()
-      .map((value) => value.split(";", 1)[0])
-      .join("; ");
+    this.rememberCookie(response);
   }
 
   async createOrganization(): Promise<string> {
@@ -559,9 +833,7 @@ class Browser {
 
   authorize(query: Record<string, string>): Promise<Response> {
     return this.auth.handle(
-      new Request(`${ORIGIN}/api/auth/oauth2/authorize?${new URLSearchParams(query).toString()}`, {
-        headers: { cookie: this.cookie },
-      }),
+      this.request(`/api/auth/oauth2/authorize?${new URLSearchParams(query).toString()}`),
     );
   }
 
@@ -569,17 +841,17 @@ class Browser {
     return (await this.auth.handle(this.post(path, body))).status;
   }
 
-  /** The headers a same-origin Hub server function call carries. */
-  headers(): Headers {
-    return new Headers({ cookie: this.cookie, origin: ORIGIN });
+  /** The headers a Hub server function call carries: same-origin unless told otherwise. */
+  headers(origin: string | null = this.origin): Headers {
+    return new Headers({ cookie: this.cookie, ...(origin === null ? {} : { origin }) });
   }
 
   private post(path: string, body: unknown): Request {
-    return new Request(`${ORIGIN}${path}`, {
+    return new Request(`${this.origin}${path}`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        origin: ORIGIN,
+        origin: this.origin,
         "sec-fetch-site": "same-origin",
         ...(this.cookie.length === 0 ? {} : { cookie: this.cookie }),
       },

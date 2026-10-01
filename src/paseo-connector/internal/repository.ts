@@ -138,6 +138,16 @@ export class ConnectorRepository implements ConnectorStore {
     return result.rowCount > 0;
   }
 
+  async discardPendingConnection(ownerUserId: string, id: string) {
+    // Flows go with it through their cascading foreign key.
+    const result = await this.runtime.query(
+      `delete from connector_connections
+       where id = $1 and owner_user_id = $2 and activated_at is null`,
+      [id, ownerUserId],
+    );
+    return result.rowCount > 0;
+  }
+
   async createFlow(input: ConsentFlow) {
     await this.runtime.query(
       `insert into connector_consent_flows

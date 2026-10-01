@@ -158,6 +158,15 @@ const CONNECTOR_OAUTH_PATHS = new Map([
   ["/api/auth/jwks", "GET"],
 ]);
 
+const FORM_MEDIA_TYPE = "application/x-www-form-urlencoded";
+
+function tokenRequestError(error: string, description: string): Response {
+  return Response.json(
+    { error, error_description: description },
+    { status: 400, headers: { "cache-control": "no-store" } },
+  );
+}
+
 export function createAuthServer(options: AuthServerOptions): AuthServer {
   const database = options.database.drizzle();
   const policy = options.policy ?? defaultInstanceAuthPolicy();
@@ -501,19 +510,42 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     // attaches, they are never cookie-authenticated.
     const headers = new Headers(request.headers);
     headers.delete("cookie");
-    const body = await request.text();
     if (path === "/api/auth/oauth2/token") {
-      const resources = new URLSearchParams(body).getAll("resource");
-      // Without this resource the library would mint an opaque token outside the connector's
-      // claim checks; every token Hub issues is a connector JWT for exactly this resource.
-      if (resources.length !== 1 || resources[0] !== connectorEndpoints?.resource) {
-        return Response.json(
-          { error: "invalid_target", error_description: "resource must be the Paseo connector" },
-          { status: 400, headers: { "cache-control": "no-store" } },
-        );
-      }
+      return connectorTokenRequest(request, headers);
     }
-    return auth.handler(new Request(request.url, { method: "POST", headers, body }));
+    const response = await auth.handler(
+      new Request(request.url, { method: "POST", headers, body: await request.text() }),
+    );
+    if (path !== "/api/auth/oauth2/register" || response.status !== 200) return response;
+    // RFC 7591 §3.2.1: a registered client is 201 Created and never cached. The pinned library
+    // answers 200 and drops its own no-store header.
+    const registered = new Headers(response.headers);
+    registered.set("cache-control", "no-store");
+    registered.set("pragma", "no-cache");
+    return new Response(response.body, { status: 201, headers: registered });
+  }
+
+  /**
+   * Admits a token request only as a plain form whose single `resource` is the connector, and
+   * hands the library that exact form re-encoded, so Hub and the library read the same fields.
+   * Without the resource the library would mint an opaque token outside the connector's claim
+   * checks; every token Hub issues is a connector JWT for exactly this resource.
+   */
+  async function connectorTokenRequest(request: Request, headers: Headers): Promise<Response> {
+    const mediaType = (request.headers.get("content-type") ?? "").split(";", 1)[0]!.trim();
+    if (mediaType.toLowerCase() !== FORM_MEDIA_TYPE) {
+      return tokenRequestError("invalid_request", "the token request must be a form");
+    }
+    const form = new URLSearchParams(await request.text());
+    const resources = form.getAll("resource");
+    if (resources.length !== 1 || resources[0] !== connectorEndpoints?.resource) {
+      return tokenRequestError("invalid_target", "resource must be the Paseo connector");
+    }
+    headers.set("content-type", FORM_MEDIA_TYPE);
+    headers.delete("content-length");
+    return auth.handler(
+      new Request(request.url, { method: "POST", headers, body: form.toString() }),
+    );
   }
 
   async function changePassword(request: Request): Promise<Response> {
