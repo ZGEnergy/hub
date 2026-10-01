@@ -69,7 +69,7 @@ async function seed(bundle: DatabaseRuntimeBundle, database: Database) {
   for (const id of Object.values(users)) {
     await run(`insert into "user" (id, name, email) values ($1, $1, $1 || '@example.test')`, [id]);
     await run(
-      `insert into member (id, organization_id, user_id, role) values ('member-' || $1, $2, $1, 'member')`,
+      `insert into member (id, organization_id, user_id, role) values ('member-' || $1, $2, $1, 'admin')`,
       [id, organizationId],
     );
   }
@@ -153,15 +153,15 @@ describe.each(["embedded", "postgres"] as const)("connector ownership on %s", (k
 
   it("is built on real membership and daemon rows", async () => {
     const fixture = await openFixture();
-    expect(await database.isOrganizationMember(fixture.aliceUserId, fixture.organizationId)).toBe(
-      true,
+    expect(await database.organizationMemberRole(fixture.aliceUserId, fixture.organizationId)).toBe(
+      "admin",
     );
-    expect(await database.isOrganizationMember(fixture.bobUserId, fixture.organizationId)).toBe(
-      true,
+    expect(await database.organizationMemberRole(fixture.bobUserId, fixture.organizationId)).toBe(
+      "admin",
     );
     expect(
-      await database.isOrganizationMember(fixture.aliceUserId, fixture.otherOrganizationId),
-    ).toBe(false);
+      await database.organizationMemberRole(fixture.aliceUserId, fixture.otherOrganizationId),
+    ).toBeUndefined();
     expect(
       (await database.findDaemonForOrganization(fixture.organizationId, fixture.daemonId))?.id,
     ).toBe(fixture.daemonId);

@@ -17,6 +17,7 @@ import { loadBuiltStartServer } from "../../server/build.js";
 import { createAuthServer } from "../../auth/server.js";
 import { composeEntitlements } from "../../auth/entitlements.js";
 import { readInstanceAuthPolicy } from "../../auth/instance-policy.js";
+import { readPaseoConnectorEnabled } from "../../paseo-connector/oauth.js";
 import { OrganizationResources } from "../../organizations/resources.js";
 import { parseProjectConfiguration, ProjectConfigurationStore } from "../../configuration/store.js";
 import { hashTemplate, UNLIMITED_TEMPLATE } from "../../entitlements/catalog.js";
@@ -75,6 +76,7 @@ async function main(): Promise<void> {
     baseURL: requiredEnvironment("PASEO_HUB_APP_URL"),
     secret: requiredEnvironment("PASEO_HUB_AUTH_SECRET"),
     policy: readInstanceAuthPolicy(process.env),
+    paseoConnector: readPaseoConnectorEnabled(process.env),
   });
   await auth.initialize?.();
   const createdApiKey = await auth.apiKeys?.create(

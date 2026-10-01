@@ -4205,13 +4205,16 @@ class PgDatabase implements Database {
     return rows.rows.map((row) => ({ provider: row.provider, count: row.count }));
   }
 
-  async isOrganizationMember(userId: string, organizationId: string): Promise<boolean> {
-    const rows = await query(
+  async organizationMemberRole(
+    userId: string,
+    organizationId: string,
+  ): Promise<string | undefined> {
+    const rows = await query<{ role: string }>(
       this.pool,
-      `select 1 from member where user_id = $1 and organization_id = $2 limit 1`,
+      `select role from member where user_id = $1 and organization_id = $2 limit 1`,
       [userId, organizationId],
     );
-    return rows.rowCount === 1;
+    return rows.rows[0]?.role;
   }
 
   startConnectionAttempt(input: StartConnectionAttemptInput): Promise<void> {

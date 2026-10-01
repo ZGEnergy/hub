@@ -1,3 +1,5 @@
+import { ORGANIZATION_ROLES } from "../auth/organization-contract.js";
+import { capabilitiesFor, parseOrganizationRole } from "../auth/organization-policy.js";
 import type { DaemonRecord, Database } from "../db/types.js";
 import {
   CONNECTOR_SCOPES,
@@ -24,9 +26,10 @@ export interface AuthorizedConnection extends Identity {
 
 /**
  * Re-proves, on every call, that a token principal may still act through its connection: the
- * connection exists for that owner, completed consent, is not revoked, its owner is still a member
- * of the connection's organization, and the bound daemon is active in that organization with
- * `hub.execute`. Then requires `requiredScope` and that the token never exceeds the connection.
+ * connection exists for that owner, completed consent, is not revoked, its owner still manages
+ * resources in the connection's organization (owner or admin), and the bound daemon is active in
+ * that organization with `hub.execute`. Then requires `requiredScope` and that the token never
+ * exceeds the connection.
  */
 export async function authorizeConnectorRequest(
   database: Database,
@@ -80,8 +83,17 @@ export async function loadCurrentConnection(
 }
 
 /**
- * The machine checks a selection, a consent decision, and every authorized call share: the user is
- * a current member of the organization and the daemon is active there with `hub.execute`.
+ * The organization roles allowed to link and drive machines: those that may manage the
+ * organization's resources, as Hub's CLI-login approval already requires.
+ */
+export const CONNECTOR_MANAGER_ROLES: readonly string[] = ORGANIZATION_ROLES.filter(
+  (role) => capabilitiesFor(role).manageResources,
+);
+
+/**
+ * The machine checks a selection, a consent decision, and every authorized call share: the user's
+ * current role in the organization may manage its resources, and the daemon is active there with
+ * `hub.execute`. A member demoted below that loses access exactly like a removed one.
  */
 export async function requireConnectableDaemon(
   database: Database,
@@ -89,8 +101,14 @@ export async function requireConnectableDaemon(
   organizationId: string,
   daemonId: string,
 ): Promise<DaemonRecord> {
-  if (!(await database.isOrganizationMember(userId, organizationId))) {
-    throw new ConnectorError("connection_revoked", "organization membership ended");
+  const role = parseOrganizationRole(
+    (await database.organizationMemberRole(userId, organizationId)) ?? "",
+  );
+  if (role === undefined || !capabilitiesFor(role).manageResources) {
+    throw new ConnectorError(
+      "connection_revoked",
+      "organization membership ended or no longer manages machines",
+    );
   }
   const daemon = await database.findDaemonForOrganization(organizationId, daemonId);
   if (daemon === undefined) throw new ConnectorError("not_found", "machine not found");

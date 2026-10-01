@@ -131,7 +131,7 @@ const CONNECT_DESCRIPTION =
 const NO_MACHINES = {
   title: "No machines to connect",
   description:
-    "Enroll a Paseo daemon in one of your organizations, then start connecting again from ChatGPT.",
+    "Only owners and admins can connect an organization's machines. Enroll a Paseo daemon in an organization you manage, then start connecting again from ChatGPT.",
 };
 const MACHINES_FAILURE = "Hub did not return your machines. Check your connection and try again.";
 const SELECT_FAILURE =

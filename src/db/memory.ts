@@ -3151,8 +3151,8 @@ class MemoryDatabase implements Database {
       );
   }
 
-  async isOrganizationMember(): Promise<boolean> {
-    return false;
+  async organizationMemberRole(): Promise<string | undefined> {
+    return undefined;
   }
 
   startConnectionAttempt(_input: StartConnectionAttemptInput): Promise<void> {

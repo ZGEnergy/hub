@@ -245,6 +245,7 @@ describe("Paseo connector MCP endpoint", () => {
         secret: SECRET,
         baseURL,
         policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+        paseoConnector: true,
       });
     auth = authFor(ORIGIN);
     otherAuth = authFor(OTHER_ORIGIN);
@@ -455,13 +456,35 @@ describe("Paseo connector MCP endpoint", () => {
   });
 
   it("challenges a request without a usable token with the resource metadata location", async () => {
-    for (const authorization of [undefined, "Bearer not-a-token", "Basic dXNlcjpwYXNz"]) {
+    // RFC 6750 §3.1: no error code when no bearer token was presented at all.
+    for (const authorization of [undefined, "Basic dXNlcjpwYXNz"]) {
       const response = await initialize(authorization);
       expect(response.status).toBe(401);
       expect(response.headers.get("www-authenticate")).toBe(
         `Bearer resource_metadata="${RESOURCE_METADATA}"`,
       );
     }
+    // A presented token that is not valid says so.
+    const response = await initialize("Bearer not-a-token");
+    expect(response.status).toBe(401);
+    expect(response.headers.get("www-authenticate")).toBe(
+      `Bearer resource_metadata="${RESOURCE_METADATA}", error="invalid_token"`,
+    );
+  });
+
+  it("answers 503, never a re-link challenge, when Hub cannot read its signing keys", async () => {
+    const { token } = await linkedAccount();
+    await bundle.runtime.query("alter table jwks rename to jwks_offline");
+    let response: Response;
+    try {
+      response = await initialize(`Bearer ${token}`);
+    } finally {
+      await bundle.runtime.query("alter table jwks_offline rename to jwks");
+    }
+    expect(response.status).toBe(503);
+    expect(response.headers.get("www-authenticate")).toBeNull();
+    // The same token is fine once the keys can be read again.
+    expect((await initialize(`Bearer ${token}`)).status).toBe(200);
   });
 
   it("rejects a Hub-signed token issued for another resource", async () => {
@@ -473,7 +496,9 @@ describe("Paseo connector MCP endpoint", () => {
 
     const response = await initialize(`Bearer ${tokens.access_token}`);
     expect(response.status).toBe(401);
-    expect(response.headers.get("www-authenticate")).toContain(RESOURCE_METADATA);
+    expect(response.headers.get("www-authenticate")).toBe(
+      `Bearer resource_metadata="${RESOURCE_METADATA}", error="invalid_token"`,
+    );
   });
 
   it("lists exactly the seven connector tools with read-only and destructive hints", async () => {

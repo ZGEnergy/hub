@@ -150,7 +150,7 @@ function connectorFailure(error: unknown, operation: string) {
 function failureMessage(error: unknown): [FailureKind, string] {
   if (error instanceof ConnectorUnavailableError) {
     return error.status === "disabled"
-      ? ["notFound", "The Paseo connector needs this Hub to be served over HTTPS."]
+      ? ["notFound", "The Paseo connector is not enabled on this Hub."]
       : ["upstreamUnavailable", "Hub's database is unavailable. Try again shortly."];
   }
   if (error instanceof ConnectorFlowError) {
@@ -168,7 +168,7 @@ function failureMessage(error: unknown): [FailureKind, string] {
   if (error instanceof ConnectorError) {
     switch (error.code) {
       case "connection_revoked":
-        return ["forbidden", "You are no longer a member of that machine's organization."];
+        return ["forbidden", "You are no longer an owner or admin of that machine's organization."];
       case "machine_incompatible":
         return [
           "forbidden",

@@ -1603,7 +1603,8 @@ export interface Database {
     organizationId: string,
     since: Date,
   ): Promise<UnroutedProviderEventCount[]>;
-  isOrganizationMember(userId: string, organizationId: string): Promise<boolean>;
+  /** The user's stored role in the organization, or undefined when they are not a member. */
+  organizationMemberRole(userId: string, organizationId: string): Promise<string | undefined>;
   startConnectionAttempt(input: StartConnectionAttemptInput): Promise<void>;
   findConnectionAttemptConfiguration(
     stateVerifier: string,

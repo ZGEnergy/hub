@@ -336,8 +336,18 @@ describe("account and organization boundary", () => {
     assert.equal((await alice.requireActiveState()).organization.id === acme, false);
   });
 
-  it("opens only the connector's OAuth client endpoints and keeps consent and client management closed", async () => {
+  it("opens no OAuth endpoint unless the operator enabled the connector", async () => {
     const hub = await startAccounts(postgres);
+    const alice = await hub.signUp("Alice", "alice@example.com");
+    const statuses = await alice.connectorOAuthStatuses();
+
+    for (const [path, status] of Object.entries(statuses)) {
+      assert.equal(status, 404, path);
+    }
+  });
+
+  it("opens only the connector's OAuth client endpoints and keeps consent and client management closed", async () => {
+    const hub = await startAccounts(postgres, undefined, true);
     const alice = await hub.signUp("Alice", "alice@example.com");
     const statuses = await alice.connectorOAuthStatuses();
 
@@ -391,8 +401,9 @@ const activeAccounts: PaseoAccounts[] = [];
 async function startAccounts(
   postgres: StartedPostgreSqlContainer,
   invitationMailer?: InvitationMailer,
+  paseoConnector = false,
 ): Promise<PaseoAccounts> {
-  const accounts = await PaseoAccounts.start(postgres, invitationMailer);
+  const accounts = await PaseoAccounts.start(postgres, invitationMailer, paseoConnector);
   activeAccounts.push(accounts);
   return accounts;
 }
@@ -416,6 +427,7 @@ class PaseoAccounts {
   static async start(
     postgres: StartedPostgreSqlContainer,
     invitationMailer?: InvitationMailer,
+    paseoConnector = false,
   ): Promise<PaseoAccounts> {
     const url = isolatedDatabaseUrl(postgres);
     const database = await createDatabase(url);
@@ -431,6 +443,7 @@ class PaseoAccounts {
         secret: "phase-one-auth-secret-at-least-32-characters",
         baseURL: "http://localhost:3000",
         policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+        paseoConnector,
         ...(invitationMailer === undefined ? {} : { invitationMailer }),
       }),
     );

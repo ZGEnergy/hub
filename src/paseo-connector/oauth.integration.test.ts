@@ -23,7 +23,13 @@ import {
   redirectDestination,
   type ConnectorOAuthService,
 } from "./flow.js";
-import { connectorOAuthEndpoints, verifyConnectorAccessToken } from "./oauth.js";
+import {
+  ConnectorUnavailableError,
+  connectorOAuthEndpoints,
+  findRefreshGrant,
+  readPaseoConnectorEnabled,
+  verifyConnectorAccessToken,
+} from "./oauth.js";
 import { startApplication, stopApplication } from "../server/runtime.js";
 import { Route as AuthorizationServerRoute } from "../routes/[.]well-known/oauth-authorization-server.js";
 import { Route as ProtectedResourceRoute } from "../routes/[.]well-known/oauth-protected-resource/mcp/paseo.js";
@@ -88,6 +94,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
       secret: "connector-oauth-test-secret-at-least-32-characters",
       baseURL: ORIGIN,
       policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+      paseoConnector: true,
     });
     connector = auth.connector!;
   }, 120_000);
@@ -259,6 +266,35 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
     return result.rows[0]!.count;
   }
 
+  async function addMember(browser: Browser, organizationId: string, role: string) {
+    await bundle.runtime.query(
+      `insert into member (id, organization_id, user_id, role, created_at)
+       values ($1, $2, $3, $4, now())`,
+      [randomUUID(), organizationId, await browser.userId(), role],
+    );
+  }
+
+  async function setRole(browser: Browser, organizationId: string, role: string) {
+    await bundle.runtime.query(
+      "update member set role = $3 where user_id = $1 and organization_id = $2",
+      [await browser.userId(), organizationId, role],
+    );
+  }
+
+  async function refreshGrantOf(tokens: Tokens) {
+    const grant = await findRefreshGrant(bundle.runtime, tokens.refresh_token ?? "");
+    expect(grant).toBeDefined();
+    return grant!;
+  }
+
+  async function refreshTokenRows(clientId: string): Promise<number> {
+    const result = await bundle.runtime.query<{ count: number }>(
+      "select count(*)::integer as count from oauth_refresh_token where client_id = $1",
+      [clientId],
+    );
+    return result.rows[0]!.count;
+  }
+
   async function principalOf(tokens: Tokens) {
     const principal = await connector.verifyAccessToken(tokens.access_token);
     expect(principal).not.toBeNull();
@@ -269,7 +305,9 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
     const metadata = await connector.authorizationServerMetadata(
       new Request(`${ORIGIN}/.well-known/oauth-authorization-server`),
     );
-    expect(await metadata.json()).toMatchObject({
+    expect(metadata.status).toBe(200);
+    const served = z.record(z.string(), z.unknown()).parse(await metadata.json());
+    expect(served).toMatchObject({
       issuer: ORIGIN,
       authorization_endpoint: `${ORIGIN}/api/auth/oauth2/authorize`,
       token_endpoint: `${ORIGIN}/api/auth/oauth2/token`,
@@ -278,6 +316,20 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
       code_challenge_methods_supported: ["S256"],
       grant_types_supported: ["authorization_code", "refresh_token"],
     });
+    expect(served).toMatchObject({ revocation_endpoint: `${ORIGIN}/api/auth/oauth2/revoke` });
+    // Every endpoint it names is one Hub serves; introspection and the like stay unadvertised.
+    const endpoints = Object.entries(served).filter(
+      ([member]) => member.endsWith("_endpoint") || member === "jwks_uri",
+    );
+    expect(endpoints.map(([, url]) => new URL(String(url)).pathname).sort()).toEqual([
+      "/api/auth/jwks",
+      "/api/auth/oauth2/authorize",
+      "/api/auth/oauth2/register",
+      "/api/auth/oauth2/revoke",
+      "/api/auth/oauth2/token",
+    ]);
+    expect(served).not.toHaveProperty("introspection_endpoint");
+    expect(served).not.toHaveProperty("introspection_endpoint_auth_methods_supported");
     expect(await connector.protectedResourceMetadata().json()).toEqual({
       resource: RESOURCE,
       authorization_servers: [ORIGIN],
@@ -498,10 +550,41 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
       await connector.revokeConnection({ connectionId: principal.connectionId }, browser.headers()),
     ).toEqual({ revoked: true });
 
+    const refreshRows = await refreshTokenRows(clientId);
     expect(await errorOf(await refresh(clientId, tokens))).toBe("invalid_grant");
+    // The refusal came before the library: the presented token was neither rotated nor revoked.
+    expect((await refreshGrantOf(tokens)).revoked).toBeNull();
+    expect(await refreshTokenRows(clientId)).toBe(refreshRows);
     await expect(
       authorizeConnectorRequest(database, principal, "paseo:read"),
     ).rejects.toMatchObject({ code: "connection_revoked" });
+  });
+
+  it("answers a refresh 503 when the grant cannot be read, and leaves the refresh token usable", async () => {
+    const { browser, machine } = await operator();
+    const clientId = await registerClient();
+    const { code, verifier } = await linkMachine(browser, clientId, machine);
+    const tokens = await exchange(clientId, code, verifier);
+    const refreshRows = await refreshTokenRows(clientId);
+
+    await bundle.runtime.query("alter table connector_connections rename to connector_offline");
+    let refused: Response;
+    try {
+      refused = await refresh(clientId, tokens);
+    } finally {
+      await bundle.runtime.query("alter table connector_offline rename to connector_connections");
+    }
+    expect(refused.status).toBe(503);
+    expect(oauthErrorSchema.parse(await refused.json()).error).toBe("temporarily_unavailable");
+    expect((await refreshGrantOf(tokens)).revoked).toBeNull();
+    expect(await refreshTokenRows(clientId)).toBe(refreshRows);
+
+    const refreshed = await refresh(clientId, tokens);
+    expect(refreshed.status).toBe(200);
+    expect(tokenResponseSchema.parse(await refreshed.json()).refresh_token).not.toBe(
+      tokens.refresh_token,
+    );
+    expect((await refreshGrantOf(tokens)).revoked).not.toBeNull();
   });
 
   it("stops a connection whose owner left the organization", async () => {
@@ -520,6 +603,68 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
       authorizeConnectorRequest(database, principal, "paseo:read"),
     ).rejects.toBeInstanceOf(ConnectorError);
     expect(await errorOf(await refresh(clientId, tokens))).toBe("invalid_grant");
+  });
+
+  it("shows a view-only member no machines and refuses their selection", async () => {
+    const { organizationId, machine } = await operator();
+    const viewer = new Browser(auth);
+    await viewer.signUp();
+    await addMember(viewer, organizationId, "member");
+    const clientId = await registerClient();
+    const request = await authorization(viewer, clientId);
+
+    expect(await connector.listMachines(viewer.headers())).toEqual([]);
+    await expect(
+      connector.selectMachine(
+        { oauthQuery: request.connectQuery, daemonId: machine, workingDirectory: "/srv/work" },
+        viewer.headers(),
+      ),
+    ).rejects.toBeInstanceOf(ConnectorFlowError);
+    expect(await connectorRows(viewer)).toBe(0);
+  });
+
+  it("refuses consent once the selecting admin is demoted to member", async () => {
+    const { organizationId, machine } = await operator();
+    const admin = new Browser(auth);
+    await admin.signUp();
+    await addMember(admin, organizationId, "admin");
+    const clientId = await registerClient();
+    const consent = await select(
+      admin,
+      (await authorization(admin, clientId)).connectQuery,
+      machine,
+    );
+
+    await setRole(admin, organizationId, "member");
+    await expect(
+      connector.decideConsent({ ...consent, accept: true }, admin.headers()),
+    ).rejects.toMatchObject({ code: "connection_revoked" });
+    expect(await connector.listConnections(admin.headers())).toEqual([]);
+  });
+
+  it("stops an admin's connection once they are demoted to member, without spending its refresh token", async () => {
+    const { organizationId, machine } = await operator();
+    const admin = new Browser(auth);
+    await admin.signUp();
+    await addMember(admin, organizationId, "admin");
+    const clientId = await registerClient();
+    const { code, verifier } = await linkMachine(admin, clientId, machine);
+    const tokens = await exchange(clientId, code, verifier);
+    const principal = await principalOf(tokens);
+    expect((await authorizeConnectorRequest(database, principal, "paseo:read")).daemonId).toBe(
+      machine,
+    );
+
+    await setRole(admin, organizationId, "member");
+    await expect(
+      authorizeConnectorRequest(database, principal, "paseo:read"),
+    ).rejects.toMatchObject({ code: "connection_revoked" });
+    expect(await errorOf(await refresh(clientId, tokens))).toBe("invalid_grant");
+    expect((await refreshGrantOf(tokens)).revoked).toBeNull();
+
+    // Promoted back, the very same refresh token still works: the refusal never rotated it.
+    await setRole(admin, organizationId, "admin");
+    expect((await refresh(clientId, tokens)).status).toBe(200);
   });
 
   it("stops a connection whose machine was revoked and re-enrolled", async () => {
@@ -767,8 +912,34 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
     expect((await select(browser, request.connectQuery, machine)).flowId).toMatch(/\S/);
   });
 
-  it("stays disabled on a plain-http public origin and leaves Hub's own auth unchanged", async () => {
-    const origin = "http://hub.example.test";
+  it("is off unless the operator opts in, and enables on an HTTPS origin when they do", () => {
+    expect(readPaseoConnectorEnabled({})).toBe(false);
+    expect(readPaseoConnectorEnabled({ PASEO_HUB_PASEO_CONNECTOR: " " })).toBe(false);
+    expect(readPaseoConnectorEnabled({ PASEO_HUB_PASEO_CONNECTOR: "disabled" })).toBe(false);
+    expect(readPaseoConnectorEnabled({ PASEO_HUB_PASEO_CONNECTOR: "enabled" })).toBe(true);
+    expect(() => readPaseoConnectorEnabled({ PASEO_HUB_PASEO_CONNECTOR: "1" })).toThrow(
+      "PASEO_HUB_PASEO_CONNECTOR must be one of: enabled, disabled",
+    );
+    const enabled = createAuthServer({
+      database: bundle.runtime,
+      locks: bundle.locks,
+      entitlements: composeEntitlements(database, bundle.runtime).service,
+      secret: "connector-oauth-test-secret-at-least-32-characters",
+      baseURL: "https://hub.example.test",
+      policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+      paseoConnector: true,
+    });
+    expect(enabled.connector?.endpoints.resource).toBe("https://hub.example.test/mcp/paseo");
+  });
+
+  it.each([
+    { name: "a plain-http public origin", origin: "http://hub.example.test", optIn: true },
+    {
+      name: "an HTTPS origin without the opt-in",
+      origin: "https://hub.example.test",
+      optIn: false,
+    },
+  ])("stays disabled on $name and leaves Hub's own auth unchanged", async ({ origin, optIn }) => {
     const plain = createAuthServer({
       database: bundle.runtime,
       locks: bundle.locks,
@@ -776,6 +947,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
       secret: "connector-oauth-test-secret-at-least-32-characters",
       baseURL: origin,
       policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+      paseoConnector: optIn,
     });
     expect(plain.connector).toBeUndefined();
     const browser = new Browser(plain, undefined, origin);
@@ -841,6 +1013,14 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector OAuth on %s", 
     expect(await verify(`paseo_${randomBytes(24).toString("base64url")}`)).toBeNull();
     // Hub itself never trusts a token it did not sign, whatever its claims say.
     expect(await connector.verifyAccessToken(keys.sign(claims))).toBeNull();
+
+    // Unreadable signing keys are Hub's failure, not the token's: never a null (401) verdict.
+    const unreadable = () => Promise.reject(new Error("database unavailable"));
+    await expect(
+      verifyConnectorAccessToken(keys.sign(claims), ENDPOINTS, unreadable),
+    ).rejects.toBeInstanceOf(ConnectorUnavailableError);
+    // A token that is not even a JWT never reaches the keys.
+    expect(await verifyConnectorAccessToken("not-a-jwt", ENDPOINTS, unreadable)).toBeNull();
   });
 });
 

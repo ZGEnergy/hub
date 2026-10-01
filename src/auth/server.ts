@@ -42,11 +42,14 @@ import type { AccountMailer } from "./account-emails.js";
 import { oauthProviderAuthServerMetadata } from "@better-auth/oauth-provider";
 import { createDatabase } from "../db/pg.js";
 import {
+  assertRefreshGrantCurrent,
   connectorOAuthEndpoints,
   connectorOAuthPlugins,
   protectedResourceMetadata,
   verifyConnectorAccessToken,
 } from "../paseo-connector/oauth.js";
+import { ConnectorError } from "../paseo-connector/contracts.js";
+import { reportFailure } from "../failures/index.js";
 import {
   ConnectorFlowError,
   decideConnectorConsent,
@@ -92,7 +95,10 @@ export interface AuthServer {
   apiKeys?: OrganizationApiKeys;
   cliCredentials?: OrganizationCliCredentials;
   publicCredentials?: PublicCredentialAuthenticator;
-  /** The Paseo connector's OAuth surface; absent unless the public origin is HTTPS or loopback. */
+  /**
+   * The Paseo connector's OAuth surface; absent unless the operator enabled it and the public
+   * origin is HTTPS or loopback.
+   */
   connector?: ConnectorOAuthService;
   close(): Promise<void>;
 }
@@ -118,6 +124,11 @@ export interface AuthServerOptions {
   invitationMailer?: InvitationMailer;
   /** Optional account email delivery. Configured public instances require verification. */
   accountMailer?: AccountMailer;
+  /**
+   * The operator's explicit opt-in to the Paseo connector (`PASEO_HUB_PASEO_CONNECTOR=enabled`).
+   * Off by default: no OAuth provider, no client registration, no connector routes.
+   */
+  paseoConnector?: boolean;
 }
 
 const sessionSchema = z.object({
@@ -162,12 +173,15 @@ const CONNECTOR_OAUTH_PATHS = new Map([
 
 const FORM_MEDIA_TYPE = "application/x-www-form-urlencoded";
 
-function tokenRequestError(error: string, description: string): Response {
+function tokenRequestError(error: string, description: string, status = 400): Response {
   return Response.json(
     { error, error_description: description },
-    { status: 400, headers: { "cache-control": "no-store" } },
+    { status, headers: { "cache-control": "no-store" } },
   );
 }
+
+/** Authorization-server metadata members naming an endpoint, checked against what Hub serves. */
+const METADATA_ENDPOINT_MEMBER = /^(?<name>.+)_endpoint$|^jwks_uri$/u;
 
 export function createAuthServer(options: AuthServerOptions): AuthServer {
   const database = options.database.drizzle();
@@ -199,7 +213,8 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     oauthConsent: schema.oauthConsents,
     jwks: schema.jwks,
   };
-  const connectorEndpoints = connectorOAuthEndpoints(options.baseURL);
+  const connectorEndpoints =
+    options.paseoConnector === true ? connectorOAuthEndpoints(options.baseURL) : undefined;
   const connectorDatabase =
     connectorEndpoints === undefined ? undefined : createDatabase(options.database, options.locks);
   const auth = betterAuth({
@@ -438,7 +453,25 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     if (connectorEndpoints === undefined || connectorDatabase === undefined) return undefined;
     const endpoints = connectorEndpoints;
     const store = connectorDatabase;
-    const authorizationServerMetadata = oauthProviderAuthServerMetadata(auth);
+    const libraryMetadata = oauthProviderAuthServerMetadata(auth);
+    // Advertise only endpoints Hub actually serves: the library also lists introspection (and,
+    // with openid, userinfo and end-session), which stay closed.
+    const authorizationServerMetadata = async (request: Request): Promise<Response> => {
+      const response = await libraryMetadata(request);
+      if (!response.ok) return response;
+      const metadata = z.record(z.string(), z.unknown()).parse(await response.json());
+      for (const [member, value] of Object.entries(metadata)) {
+        const match = METADATA_ENDPOINT_MEMBER.exec(member);
+        if (match === null || typeof value !== "string") continue;
+        if (CONNECTOR_OAUTH_PATHS.has(new URL(value).pathname)) continue;
+        delete metadata[member];
+        const name = match.groups?.["name"];
+        if (name !== undefined) delete metadata[`${name}_endpoint_auth_methods_supported`];
+      }
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      return new Response(JSON.stringify(metadata), { status: response.status, headers });
+    };
     const flow = async (headers: Headers): Promise<ConnectorFlowContext> => {
       const session = await sessions.read(headers);
       if (session === undefined) throw new ConnectorFlowError("unauthenticated");
@@ -546,11 +579,44 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     if (resources.length !== 1 || resources[0] !== connectorEndpoints?.resource) {
       return tokenRequestError("invalid_target", "resource must be the Paseo connector");
     }
+    if (form.get("grant_type") === "refresh_token") {
+      const refused = await refreshGrantRefusal(form.get("refresh_token"));
+      if (refused !== undefined) return refused;
+    }
     headers.set("content-type", FORM_MEDIA_TYPE);
     headers.delete("content-length");
     return auth.handler(
       new Request(request.url, { method: "POST", headers, body: form.toString() }),
     );
+  }
+
+  /**
+   * Refuses a refresh whose connection grant is no longer current before the library rotates the
+   * presented refresh token, so a refusal (or Hub's own outage) never spends it. A dead grant is
+   * invalid_grant; failing to read the grant is 503, never invalid_grant.
+   */
+  async function refreshGrantRefusal(presented: string | null): Promise<Response | undefined> {
+    if (presented === null || presented === "" || connectorDatabase === undefined) return undefined;
+    try {
+      await assertRefreshGrantCurrent(options.database, connectorDatabase, presented, new Date());
+      return undefined;
+    } catch (error) {
+      if (error instanceof ConnectorError) {
+        return tokenRequestError(
+          "invalid_grant",
+          "the connector connection is no longer authorized",
+        );
+      }
+      reportFailure(error, {
+        operation: "paseo_connector.token.refresh_grant",
+        component: "paseo_connector",
+      });
+      return tokenRequestError(
+        "temporarily_unavailable",
+        "the authorization server could not check this grant; retry later",
+        503,
+      );
+    }
   }
 
   async function changePassword(request: Request): Promise<Response> {

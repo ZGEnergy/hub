@@ -289,7 +289,7 @@ async function seedMachine(bundle: DatabaseRuntimeBundle, database: Database) {
       [id],
     );
     await bundle.runtime.query(
-      `insert into member (id, organization_id, user_id, role) values ('member-' || $1, $2, $1, 'member')`,
+      `insert into member (id, organization_id, user_id, role) values ('member-' || $1, $2, $1, 'admin')`,
       [id, organizationId],
     );
   }
@@ -1005,7 +1005,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
     ).toEqual([mine.agentId]);
   });
 
-  it("rejects a removed member or a revoked connection before any daemon call", async () => {
+  it("rejects a removed or demoted member or a revoked connection before any daemon call", async () => {
     const started = await service.startAgent(alice.principal, launch());
     daemon.calls.length = 0;
     await bundle.runtime.query("delete from member where user_id = $1", [machine.alice]);
@@ -1017,6 +1017,18 @@ describe.each(["embedded", "postgres"] as const)("Paseo connector service on %s"
     ].map(rejection)) {
       expect((await attempt).code).toBe("connection_revoked");
     }
+    // A view-only member may not drive machines: demotion ends access like removal does.
+    const setBobRole = (role: string) =>
+      bundle.runtime.query("update member set role = $2 where user_id = $1", [machine.bob, role]);
+    await setBobRole("member");
+    for (const attempt of [
+      service.startAgent(bob.principal, launch()),
+      service.getConnection(bob.principal),
+      service.listAgents(bob.principal),
+    ].map(rejection)) {
+      expect((await attempt).code).toBe("connection_revoked");
+    }
+    await setBobRole("admin");
     expect(
       await database.connector.revokeConnection(machine.bob, bob.principal.connectionId, T0),
     ).toBe(true);
@@ -1325,6 +1337,7 @@ describe("Paseo connector service wiring", () => {
       secret: "connector-service-test-secret-at-least-32-characters",
       baseURL: "http://localhost:3000",
       policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+      paseoConnector: true,
     });
     try {
       const machine = await seedMachine(bundle, database);

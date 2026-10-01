@@ -56,8 +56,17 @@ export async function handlePaseoConnectorMcp(
   if (access.status !== "enabled") return connectorUnavailableResponse(access.status);
   const { oauth, database, service } = access;
   const token = bearerToken(request.headers.get("authorization"));
-  const principal = token === undefined ? null : await oauth.verifyAccessToken(token);
-  if (principal === null) return unauthorizedConnectorResponse(oauth.endpoints);
+  let principal: ConnectorPrincipal | null;
+  try {
+    principal = token === undefined ? null : await oauth.verifyAccessToken(token);
+  } catch (error) {
+    // Hub could not read its own signing keys: the token may be fine, so never ask for a re-link.
+    reportFailure(error, { operation: "paseo_connector.mcp.verify_token", component: CONNECTOR });
+    return temporarilyUnavailable();
+  }
+  if (principal === null) {
+    return unauthorizedConnectorResponse(oauth.endpoints, token !== undefined);
+  }
 
   try {
     await authorizeConnectorRequest(
@@ -71,7 +80,7 @@ export async function handlePaseoConnectorMcp(
     // Anything else about the connection (a revoked machine, say) is the tools' to report.
     if (!(error instanceof ConnectorError)) {
       reportFailure(error, { operation: "paseo_connector.mcp.authorize", component: CONNECTOR });
-      return Response.json({ error: "temporarily_unavailable" }, { status: 503 });
+      return temporarilyUnavailable();
     }
   }
 
@@ -111,6 +120,10 @@ export async function handlePaseoConnectorMcp(
 
 const CONNECTOR = "paseo_connector";
 
+function temporarilyUnavailable(): Response {
+  return Response.json({ error: "temporarily_unavailable" }, { status: 503 });
+}
+
 function bearerToken(header: string | null): string | undefined {
   return /^Bearer ([^\s]+)$/iu.exec(header ?? "")?.[1];
 }
@@ -123,7 +136,7 @@ function gateRefusal(error: unknown, endpoints: ConnectorOAuthEndpoints): Respon
       { error: "invalid_token" },
       {
         status: 401,
-        headers: { "WWW-Authenticate": `${connectorChallenge(endpoints)}, error="invalid_token"` },
+        headers: { "WWW-Authenticate": connectorChallenge(endpoints, "invalid_token") },
       },
     );
   }
@@ -132,9 +145,7 @@ function gateRefusal(error: unknown, endpoints: ConnectorOAuthEndpoints): Respon
       { error: "insufficient_scope" },
       {
         status: 403,
-        headers: {
-          "WWW-Authenticate": `${connectorChallenge(endpoints)}, error="insufficient_scope"`,
-        },
+        headers: { "WWW-Authenticate": connectorChallenge(endpoints, "insufficient_scope") },
       },
     );
   }

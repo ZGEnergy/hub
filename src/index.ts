@@ -30,6 +30,7 @@ import {
 } from "./billing/index.js";
 import { composeEntitlements, type ComposedEntitlements } from "./auth/entitlements.js";
 import { readInstanceAuthPolicy } from "./auth/instance-policy.js";
+import { readPaseoConnectorEnabled } from "./paseo-connector/oauth.js";
 import { createRuntimeConfiguration } from "./runtime-configuration/index.js";
 import { CompositionResources } from "./composition-resources.js";
 import {
@@ -113,6 +114,7 @@ async function createProductionRuntime(): Promise<ApplicationRuntime> {
       runtime,
       locks,
       config.authPolicy,
+      config.paseoConnector,
       identity,
       config.trustedClientIpHeader,
       billing,
@@ -190,6 +192,7 @@ function createProductionAuthServer(
   database: DatabaseRuntime,
   locks: Locks,
   authPolicy: RuntimeConfig["authPolicy"],
+  paseoConnector: boolean,
   identity: HubIdentity,
   trustedClientIpHeader: string | undefined,
   billing: BillingRuntime | null,
@@ -203,6 +206,7 @@ function createProductionAuthServer(
     secret: identity.authSecret,
     baseURL: identity.appUrl,
     policy: authPolicy,
+    paseoConnector,
     ...(trustedClientIpHeader === undefined ? {} : { trustedClientIpHeader }),
     ...(invitationMailer === undefined ? {} : { invitationMailer }),
     ...(accountMailer === undefined ? {} : { accountMailer }),
@@ -266,6 +270,7 @@ function loadRuntimeConfig(): RuntimeConfig {
     bind: process.env["PASEO_HUB_BIND"] ?? "0.0.0.0",
     ...(trustedClientIpHeader === undefined ? {} : { trustedClientIpHeader }),
     authPolicy: readInstanceAuthPolicy(process.env),
+    paseoConnector: readPaseoConnectorEnabled(process.env),
   };
 }
 

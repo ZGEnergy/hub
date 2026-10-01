@@ -101,7 +101,7 @@ describeConnector("Paseo connector against a real daemon and real agents", () =>
   const email = `connector-${randomUUID()}@paseo.test`;
 
   beforeAll(async () => {
-    hub = await HubE2E.start({ realAgent: true, productionRuntime: true });
+    hub = await HubE2E.start({ realAgent: true, productionRuntime: true, paseoConnector: true });
     origin = hub.publicOrigin;
     workingDirectory = hub.workspaceDirectory;
     const enrollment = await hub.connect();
@@ -162,7 +162,7 @@ describeConnector("Paseo connector against a real daemon and real agents", () =>
       body: JSON.stringify({ name: "Connector Operator", email, password }),
     });
     assert.equal(signedUp.status, 200, "sign-up");
-    await hub.addSeededOrganizationMember(email);
+    await hub.addSeededOrganizationAdmin(email);
 
     const verifier = randomBytes(32).toString("base64url");
     const state = randomUUID();
@@ -325,13 +325,13 @@ describeConnector("Paseo connector against a real daemon and real agents", () =>
     return DaemonAgent.parse(await hub.inspectDaemonAgent(agentId));
   }
 
-  async function initializeStatus(authorization: string) {
+  async function initializeStatus(authorization?: string) {
     const response = await fetch(`${origin}/mcp/paseo`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
-        authorization,
+        ...(authorization === undefined ? {} : { authorization }),
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
@@ -348,11 +348,15 @@ describeConnector("Paseo connector against a real daemon and real agents", () =>
   }
 
   it("1. lists the seven tools, the bound machine and directory, and a ready Claude", async () => {
-    const anonymous = await initializeStatus("Bearer not-a-token");
+    const resourceMetadata = `${origin}/.well-known/oauth-protected-resource/mcp/paseo`;
+    const anonymous = await initializeStatus();
     assert.equal(anonymous.status, 401);
+    assert.equal(anonymous.challenge, `Bearer resource_metadata="${resourceMetadata}"`);
+    const invalid = await initializeStatus("Bearer not-a-token");
+    assert.equal(invalid.status, 401);
     assert.equal(
-      anonymous.challenge,
-      `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/mcp/paseo"`,
+      invalid.challenge,
+      `Bearer resource_metadata="${resourceMetadata}", error="invalid_token"`,
     );
 
     const client = await connectorClient();

@@ -3,6 +3,7 @@ import { posix } from "node:path";
 import type { Database } from "../db/types.js";
 import type { DatabaseRuntime } from "../db/runtime/index.js";
 import {
+  CONNECTOR_MANAGER_ROLES,
   isConnectorScope,
   requireConnectableDaemon,
   type ConnectorPrincipal,
@@ -350,7 +351,10 @@ export async function revokeConnectorConnection(
   };
 }
 
-/** Active daemons in every organization the user currently belongs to. */
+/**
+ * Active daemons in every organization where the user's current role may manage resources (owner
+ * or admin). A view-only member sees none.
+ */
 export async function listMemberDaemons(
   runtime: DatabaseRuntime,
   userId: string,
@@ -369,9 +373,9 @@ export async function listMemberDaemons(
      join organization on organization.id = member.organization_id
      join machines on machines.org_id = member.organization_id
      join daemons on daemons.machine_id = machines.id
-     where member.user_id = $1 and daemons.status = 'active'
+     where member.user_id = $1 and member.role = any($2::text[]) and daemons.status = 'active'
      order by organization.name, daemons.slug`,
-    [userId],
+    [userId, [...CONNECTOR_MANAGER_ROLES]],
   );
   return result.rows.map((row) => ({
     daemonId: row.id,

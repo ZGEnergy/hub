@@ -4,9 +4,10 @@ import { getOAuthProviderState, oauthProvider } from "@better-auth/oauth-provide
 import { APIError } from "better-auth/api";
 import { verifyJwsAccessToken } from "better-auth/oauth2";
 import { jwt } from "better-auth/plugins";
+import type { DatabaseRuntime } from "../db/runtime/index.js";
 import type { Database } from "../db/types.js";
 import { loadCurrentConnection, type ConnectorPrincipal } from "./authorization.js";
-import { CONNECTOR_SCOPES, type ConsentFlow } from "./contracts.js";
+import { CONNECTOR_SCOPES, ConnectorError, type ConsentFlow } from "./contracts.js";
 
 export const CONNECTOR_RESOURCE_PATH = "/mcp/paseo";
 export const CONNECTOR_CONNECT_PAGE = "/oauth/connect";
@@ -25,9 +26,29 @@ export interface ConnectorOAuthEndpoints {
   connectionClaim: string;
 }
 
+/** The operator's explicit switch for the connector. Off unless set to `enabled`. */
+export const PASEO_CONNECTOR_ENVIRONMENT = "PASEO_HUB_PASEO_CONNECTOR";
+const PASEO_CONNECTOR_MODES = ["enabled", "disabled"] as const;
+
+/**
+ * Whether the operator opted in to the connector. Unset or blank means disabled; any value other
+ * than `enabled` or `disabled` is a startup error, like Hub's other mode settings.
+ */
+export function readPaseoConnectorEnabled(
+  environment: Record<string, string | undefined>,
+): boolean {
+  const value = environment[PASEO_CONNECTOR_ENVIRONMENT]?.trim() ?? "";
+  if (value === "" || value === "disabled") return false;
+  if (value === "enabled") return true;
+  throw new Error(
+    `${PASEO_CONNECTOR_ENVIRONMENT} must be one of: ${PASEO_CONNECTOR_MODES.join(", ")}`,
+  );
+}
+
 /**
  * Derives the connector's issuer and resource from Hub's public origin, or undefined when the
  * connector must stay disabled: OAuth tokens are only issued over HTTPS, or plain HTTP on loopback.
+ * The operator's opt-in (`readPaseoConnectorEnabled`) is checked separately, before this.
  */
 export function connectorOAuthEndpoints(publicOrigin: string): ConnectorOAuthEndpoints | undefined {
   const url = new URL(publicOrigin);
@@ -125,7 +146,74 @@ export async function assertGrantCurrent(
   const { connection } = await loadCurrentConnection(database, userId, connectionId);
   const granted = new Set<string>([...connection.scopes, OFFLINE_ACCESS_SCOPE]);
   const widened = requestedScopes.filter((scope) => !granted.has(scope));
-  if (widened.length > 0) throw new Error(`scopes exceed the connection: ${widened.join(" ")}`);
+  if (widened.length > 0) {
+    throw new ConnectorError(
+      "insufficient_scope",
+      `scopes exceed the connection: ${widened.join(" ")}`,
+    );
+  }
+}
+
+/** A stored refresh token row, as far as the connector's grant check needs it. */
+export interface StoredRefreshGrant {
+  userId: string;
+  referenceId: string | null;
+  scopes: readonly string[];
+  revoked: Date | null;
+  expiresAt: Date;
+}
+
+/**
+ * Finds the refresh token a client presented the way the pinned OAuth provider stores it: no
+ * prefix and no custom format are configured, and `storeTokens` defaults to "hashed", which is
+ * unpadded base64url SHA-256 of the token (`defaultHasher`/`getStoredToken` in
+ * node_modules/@better-auth/oauth-provider/dist/utils-*.mjs; lookup in `handleRefreshTokenGrant`).
+ */
+export async function findRefreshGrant(
+  runtime: DatabaseRuntime,
+  presentedToken: string,
+): Promise<StoredRefreshGrant | undefined> {
+  const stored = createHash("sha256").update(presentedToken).digest("base64url");
+  const result = await runtime.query<{
+    user_id: string;
+    reference_id: string | null;
+    scopes: string[];
+    revoked: Date | null;
+    expires_at: Date;
+  }>(
+    `select user_id, reference_id, scopes, revoked, expires_at
+     from oauth_refresh_token where token = $1`,
+    [stored],
+  );
+  const row = result.rows[0];
+  if (row === undefined) return undefined;
+  return {
+    userId: row.user_id,
+    referenceId: row.reference_id,
+    scopes: row.scopes,
+    revoked: row.revoked === null ? null : new Date(row.revoked),
+    expiresAt: new Date(row.expires_at),
+  };
+}
+
+/**
+ * Proves a presented refresh token's connection grant is still current BEFORE the library sees the
+ * request. The library rotates (revokes) the old refresh token in parallel with minting the access
+ * token, so a check that fails only inside `customAccessTokenClaims` would already have spent the
+ * token. Unknown, expired and already-rotated tokens pass through: the library refuses those
+ * itself, and its reuse detection stays the library's. Throws ConnectorError when the grant is
+ * dead; any other error is an infrastructure failure.
+ */
+export async function assertRefreshGrantCurrent(
+  runtime: DatabaseRuntime,
+  database: Database,
+  presentedToken: string,
+  now: Date,
+): Promise<void> {
+  const grant = await findRefreshGrant(runtime, presentedToken);
+  if (grant === undefined || grant.revoked !== null || grant.expiresAt <= now) return;
+  if (grant.referenceId === null) throw new ConnectorError("not_found", "not a connector grant");
+  await assertGrantCurrent(database, grant.userId, grant.referenceId, grant.scopes);
 }
 
 /** The Better Auth plugins that make Hub the connector's authorization server. */
@@ -151,10 +239,13 @@ export function connectorOAuthPlugins(endpoints: ConnectorOAuthEndpoints, databa
       customAccessTokenClaims: async ({ user, referenceId, resource, scopes }) => {
         try {
           if (!user || !referenceId || resource !== endpoints.resource) {
-            throw new Error("not a connector grant");
+            throw new ConnectorError("not_found", "not a connector grant");
           }
           await assertGrantCurrent(database, user.id, referenceId, scopes);
-        } catch {
+        } catch (error) {
+          // A dead grant is the client's to re-link. Anything else (the database, say) is Hub's
+          // failure and must surface as a server error, never as invalid_grant.
+          if (!(error instanceof ConnectorError)) throw error;
           throw new APIError("BAD_REQUEST", {
             error: "invalid_grant",
             error_description: "the connector connection is no longer authorized",
@@ -176,16 +267,43 @@ export function protectedResourceMetadata(endpoints: ConnectorOAuthEndpoints) {
   };
 }
 
-/** The `WWW-Authenticate` value an unauthenticated connector MCP request is answered with. */
-export function connectorChallenge(endpoints: ConnectorOAuthEndpoints): string {
-  return `Bearer resource_metadata="${endpoints.resourceMetadataUrl}"`;
+/**
+ * The `WWW-Authenticate` value a refused connector MCP request is answered with. RFC 6750 §3.1: a
+ * request that presented no token gets no error code; a presented token that failed gets one.
+ */
+export function connectorChallenge(
+  endpoints: ConnectorOAuthEndpoints,
+  error?: "invalid_token" | "insufficient_scope",
+): string {
+  const challenge = `Bearer resource_metadata="${endpoints.resourceMetadataUrl}"`;
+  return error === undefined ? challenge : `${challenge}, error="${error}"`;
 }
 
-export function unauthorizedConnectorResponse(endpoints: ConnectorOAuthEndpoints): Response {
+/** 401 for a missing token, or for a presented one that is invalid, expired or foreign. */
+export function unauthorizedConnectorResponse(
+  endpoints: ConnectorOAuthEndpoints,
+  tokenPresented: boolean,
+): Response {
   return Response.json(
     { error: "invalid_token" },
-    { status: 401, headers: { "WWW-Authenticate": connectorChallenge(endpoints) } },
+    {
+      status: 401,
+      headers: {
+        "WWW-Authenticate": connectorChallenge(
+          endpoints,
+          tokenPresented ? "invalid_token" : undefined,
+        ),
+      },
+    },
   );
+}
+
+/** Hub could not read what it needs to judge a token: not the token's fault, so never a 401. */
+export class ConnectorUnavailableError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ConnectorUnavailableError";
+  }
 }
 
 /**
@@ -193,16 +311,26 @@ export function unauthorizedConnectorResponse(endpoints: ConnectorOAuthEndpoints
  * JWKS with exactly this issuer, this resource as audience, an unexpired `exp`, a subject, and the
  * connection claim. Anything else (opaque OAuth tokens, API keys, CLI credentials, enrollment
  * tokens, another resource's token) is null. Callers still run `authorizeConnectorRequest`.
+ * Throws ConnectorUnavailableError when Hub's own signing keys cannot be read.
  */
 export async function verifyConnectorAccessToken(
   token: string,
   endpoints: ConnectorOAuthEndpoints,
   jwks: ConnectorJwksSource,
 ): Promise<ConnectorPrincipal | null> {
+  let jwksFailure: { error: unknown } | undefined;
+  const jwksFetch: ConnectorJwksSource = async () => {
+    try {
+      return await jwks();
+    } catch (error) {
+      jwksFailure = { error };
+      throw error;
+    }
+  };
   let payload: Record<string, unknown>;
   try {
     payload = await verifyJwsAccessToken(token, {
-      jwksFetch: jwks,
+      jwksFetch,
       verifyOptions: {
         issuer: endpoints.issuer,
         audience: endpoints.resource,
@@ -211,6 +339,11 @@ export async function verifyConnectorAccessToken(
       },
     });
   } catch {
+    if (jwksFailure !== undefined) {
+      throw new ConnectorUnavailableError("signing keys could not be read", {
+        cause: jwksFailure.error,
+      });
+    }
     return null;
   }
   const connectionId = payload[endpoints.connectionClaim];
