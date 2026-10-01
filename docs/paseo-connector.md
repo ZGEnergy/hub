@@ -67,7 +67,7 @@ connection must be active and not revoked, the user must still be an owner or ad
 machine must still be active with `hub.execute`, and the stored scopes must still be within the connection's.
 If that check fails the answer is `400` `invalid_grant` and the presented refresh token is left untouched. If
 Hub cannot read the grant at all the answer is `503` `temporarily_unavailable`, and the same refresh token
-stays usable for a retry.
+stays usable for a retry. In the bounded case where the grant changes or a database fault occurs after Hub's pre-check passes but while the OAuth library is issuing tokens, the library has already rotated the refresh token, the client gets a server error, and the user may need to re-link.
 
 ## Scopes
 
@@ -171,20 +171,20 @@ A tool error has `isError: true`, a text line `<code>: <message>`, and
 `structuredContent.error = { code, message, operationId?, agentId?, state? }`. Only the caller's own IDs ever
 appear in it.
 
-| Code                                 | Meaning                                                                            |
-| ------------------------------------ | ---------------------------------------------------------------------------------- |
-| `not_found`                          | No such agent or operation for this connection. Other users' agents look the same. |
-| `machine_offline`                    | The machine is not connected to Hub. Nothing is queued; try again later.           |
-| `machine_incompatible`               | The daemon is too old, revoked, or lacks `hub.execute`.                            |
-| `runtime_unavailable`                | The provider, model or mode is not available on the machine.                       |
-| `insufficient_scope`                 | The token lacks the scope the tool needs.                                          |
-| `request_conflict`                   | The request key was already used with different arguments.                         |
-| `create_rejected`, `prompt_rejected` | The machine refused to create the agent, or refused the text.                      |
-| `outcome_unknown`                    | The machine may have acted. Inspect the operation; do not retry with a new key.    |
-| `daemon_rejected`                    | The machine refused a read or a cancellation.                                      |
-| `connection_revoked`                 | The connection was revoked.                                                        |
-| `invalid_input`                      | The arguments are invalid. The message lists the fields.                           |
-| `internal_error`                     | An unexpected Hub failure. Hub logs it.                                            |
+| Code                                 | Meaning                                                                                                      |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `not_found`                          | No such agent or operation for this connection. Other users' agents look the same.                           |
+| `machine_offline`                    | The machine is not connected to Hub. Nothing is queued; try again later.                                     |
+| `machine_incompatible`               | The daemon is too old, revoked, or lacks `hub.execute`.                                                      |
+| `runtime_unavailable`                | The provider, model or mode is not available on the machine.                                                 |
+| `insufficient_scope`                 | The token lacks the scope the tool needs.                                                                    |
+| `request_conflict`                   | The request key was already used with different arguments.                                                   |
+| `create_rejected`, `prompt_rejected` | The machine refused to create the agent, or refused the text.                                                |
+| `outcome_unknown`                    | The machine may have acted. Inspect the operation; do not retry with a new key.                              |
+| `daemon_rejected`                    | The machine refused a read or a cancellation.                                                                |
+| `connection_revoked`                 | The connection was revoked, or the account lost organization membership or was demoted below owner or admin. |
+| `invalid_input`                      | The arguments are invalid. The message lists the fields.                                                     |
+| `internal_error`                     | An unexpected Hub failure. Hub logs it.                                                                      |
 
 ## Registering a private MCP app in ChatGPT
 
@@ -219,7 +219,7 @@ invitation flow is not part of this run.
 
 | Item            | Tested                                                                                                                                                 |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Hub             | 0.10.0, commit `<filled by controller>`, PostgreSQL 17                                                                                                 |
+| Hub             | 0.10.0, commit `e501909`, PostgreSQL 17                                                                                                                |
 | Paseo daemon    | 0.10.0, source commit `2c9b09e4a9`                                                                                                                     |
 | Agent provider  | `claude` (Claude Code 2.1.285), model `claude-haiku-4-5` chosen from `list_runtimes`                                                                   |
 | Transport       | MCP Streamable HTTP, stateless JSON responses, `@modelcontextprotocol/sdk` 1.30.0 client                                                               |
