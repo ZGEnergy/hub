@@ -156,6 +156,8 @@ function failureMessage(error: unknown): [FailureKind, string] {
     switch (error.code) {
       case "unauthenticated":
         return ["authentication", "Sign in to Hub to continue."];
+      case "password_change_required":
+        return ["forbidden", "Replace your temporary Hub password before connecting an app."];
       case "invalid_request":
         return ["validation", `${error.message}.`];
       case "flow_not_found":

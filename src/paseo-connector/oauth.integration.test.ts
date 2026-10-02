@@ -299,6 +299,42 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
     );
   }
 
+  it("requires password rotation before selecting or approving a connector", async () => {
+    const { browser, machine } = await operator();
+    const clientId = await registerClient();
+    const request = await authorization(browser, clientId);
+    const consent = await select(browser, request.connectQuery, machine);
+    const userId = await browser.userId();
+    await bundle.runtime.query('update "user" set must_change_password = true where id = $1', [
+      userId,
+    ]);
+    const approval = { oauthQuery: consent.oauthQuery, flowId: consent.flowId, accept: true };
+
+    await expect(connector.listMachines(browser.headers())).rejects.toMatchObject({
+      code: "password_change_required",
+    });
+    await expect(
+      connector.selectMachine(
+        { oauthQuery: request.connectQuery, daemonId: machine, workingDirectory: "/srv/work" },
+        browser.headers(),
+      ),
+    ).rejects.toMatchObject({ code: "password_change_required" });
+    await expect(connector.decideConsent(approval, browser.headers())).rejects.toMatchObject({
+      code: "password_change_required",
+    });
+
+    await auth.changePassword!(
+      { currentPassword: "account-password", newPassword: "replacement-account-password" },
+      browser.headers(),
+    );
+    await browser.signIn("replacement-account-password");
+    await expect(connector.decideConsent(approval, browser.headers())).rejects.toMatchObject({
+      code: "flow_not_found",
+    });
+    const linked = await linkMachine(browser, clientId, machine);
+    await exchange(clientId, linked.code, linked.verifier);
+  });
+
   async function refreshGrantOf(tokens: Tokens) {
     const grant = await findRefreshGrant(bundle.runtime, tokens.refresh_token ?? "");
     expect(grant).toBeDefined();
@@ -1120,9 +1156,9 @@ class Browser {
     private readonly origin = ORIGIN,
   ) {}
 
-  async signIn(): Promise<void> {
+  async signIn(password = "account-password"): Promise<void> {
     const response = await this.auth.handle(
-      this.post("/api/auth/sign-in/email", { email: this.email, password: "account-password" }),
+      this.post("/api/auth/sign-in/email", { email: this.email, password }),
     );
     expect(response.status).toBe(200);
     this.rememberCookie(response);

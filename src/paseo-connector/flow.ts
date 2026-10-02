@@ -28,6 +28,7 @@ const MAX_WORKING_DIRECTORY_LENGTH = 4096;
 
 export type ConnectorFlowErrorCode =
   | "unauthenticated"
+  | "password_change_required"
   | "invalid_request"
   | "flow_not_found"
   | "authorization_failed";

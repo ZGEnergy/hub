@@ -32,6 +32,8 @@ which reports what the daemon has configured, and Hub never derives a runtime fr
 - **An owner or admin.** Only a user whose current role in the machine's organization is `owner` or `admin`
   (the roles that manage the organization's resources) can see machines, select one, approve the link, or
   use or refresh a connection. A view-only `member` sees no machines.
+- **A completed password change.** A bootstrap owner must replace their temporary Hub password before
+  selecting a machine or approving connector consent. Direct browser calls enforce the same gate.
 - **A database.** Use embedded PGlite (the default, stored in `PASEO_HUB_DATA_DIR`) or `DATABASE_URL`. Without
   one, connector routes answer 503.
 - **A stable `PASEO_HUB_AUTH_SECRET`** (or the generated one kept in the data directory). Hub's token

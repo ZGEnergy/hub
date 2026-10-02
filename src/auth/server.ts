@@ -477,6 +477,7 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     const flow = async (headers: Headers): Promise<ConnectorFlowContext> => {
       const session = await sessions.read(headers);
       if (session === undefined) throw new ConnectorFlowError("unauthenticated");
+      if (session.mustChangePassword) throw new ConnectorFlowError("password_change_required");
       return {
         database: store,
         account: { userId: session.userId, sessionId: session.sessionId },
