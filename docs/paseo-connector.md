@@ -1,9 +1,10 @@
 # Paseo Agent Connector (remote MCP)
 
-**ChatGPT client smoke: core tool path and cancellation verified in user-reported tests.** A ChatGPT
-agent on a MacBook called this server over public HTTPS and exercised launch, result retrieval,
-idempotency, follow-up, cancellation and ownership isolation. Revocation, refresh, OpenAI Dots and other
-clients remain unverified through that client. See [Evidence](#evidence) for the exact scope and provenance.
+**ChatGPT and OpenAI Dots: user-reported live tool evidence.** A ChatGPT agent on a MacBook exercised
+launch, result retrieval, idempotency, follow-up, cancellation and ownership isolation over public HTTPS.
+The operator's OpenAI Dots agent ("Dotty") subsequently launched a real coding agent and retrieved its
+file-read result through the installed plugin. Revocation, refresh and other clients remain unverified.
+See [Evidence](#evidence) for the exact scope and provenance.
 
 ## What it is
 
@@ -335,10 +336,11 @@ Three kinds of evidence, which say different things:
    official MCP TypeScript SDK as the client. See [Local verification](#local-verification). The Claude
    Code there is the daemon-side coding agent that `start_agent` launched, not a hosted MCP client calling
    the connector.
-3. **Actual ChatGPT client: user-reported smoke.** The operator supplied an MCP transcript from a ChatGPT
-   agent on a MacBook using the public HTTPS test deployment at commit `df5fcd9`. See
-   [ChatGPT client smoke](#chatgpt-client-smoke). This is not proof of OpenAI Dots, other clients, or every
-   lifecycle behavior.
+3. **Actual ChatGPT and OpenAI Dots clients: user-reported execution.** The operator supplied an MCP
+   transcript from a ChatGPT agent on a MacBook using the public HTTPS test deployment at commit
+   `df5fcd9`, followed by a Dotty-specific probe. See [ChatGPT client smoke](#chatgpt-client-smoke) and
+   [OpenAI Dots probe](#openai-dots-probe). These reports do not prove other clients or every lifecycle
+   behavior.
 
 ### ChatGPT client smoke
 
@@ -374,21 +376,46 @@ Reported cancellation agent: `4a49b22b-f919-4576-90ef-4ab54d8c85af`; request key
 was epoch `79396709-aff1-4582-a348-dc289e0bfc88`, sequence 66; the later read after that cursor returned
 `entries: []` and `hasNewer: false`.
 
-These reports do not verify refresh-token behavior, revocation through ChatGPT, or the operator's OpenAI
-Dots agent ("Dotty"). The separate local E2E evidence below covers server-side revocation; it must not be
-substituted for the missing client checks.
+These ChatGPT reports do not verify refresh-token behavior or revocation through the client. The
+separate local E2E evidence below covers server-side revocation; it must not be substituted for the
+missing client checks.
+
+### OpenAI Dots probe
+
+Following the Dotty-specific test request, the operator reported successful execution through
+**Paseo Agent Connector — Live Test**. This is user-reported evidence from the operator's OpenAI Dots
+agent ("Dotty"), not a separately rerun controller test.
+
+The reported calls were:
+
+1. `get_connection`: machine `lightning` online, working directory
+   `/home/joe/.local/share/paseo-agent-connector-live/workspace`.
+2. `list_runtimes`: Claude ready and enabled.
+3. `start_agent`: provider `claude`, model `claude-haiku-4-5`, mode `plan`, title `Read live probe`,
+   request key `7be6286d-4bc2-4e15-a713-5ad26b8a749f`; task to read `probe.txt` only, return its exact probe
+   line, and make no file or settings changes.
+4. `get_agent` twice for agent `c9a50aa3-de32-428d-9bf7-2d78d4e1af1b` with limit 20: first `running`,
+   then `idle` with `attentionReason: finished`.
+
+The completed timeline contained one `Read` tool call and no file-write calls. The exact result was
+`PASEO_CONNECTOR_LIVE_PROBE=machine-read-confirmed`.
+
+This demonstrates Dotty's access to the installed remote plugin and the real launch/status/result path.
+It does not independently verify Dotty-specific follow-up, idempotency, cancellation, isolation,
+revocation or refresh behavior. The broader ChatGPT smoke above is distinct evidence, not a substitute
+for those unexercised Dotty-specific checks.
 
 ## Client-specific examples
 
 These vendor notes were read on 2026-10-01 and describe how documented behavior meets Hub's contract.
-The later user-reported ChatGPT smoke is recorded above; other clients remain unverified with this server.
+The later user-reported ChatGPT and Dotty runs are recorded above; other clients remain unverified.
 Linking alone is not proof that a client can call the tools.
 
 ### ChatGPT and OpenAI Dots
 
 Status: user-reported ChatGPT client tests passed the core tool path and active-turn cancellation.
-Revocation and refresh through that client remain unverified. OpenAI Dots, including the operator's
-"Dotty", has not been exercised.
+A subsequent user-reported Dotty probe passed discovery, runtime selection, real launch and result
+retrieval. Revocation and refresh remain unverified through either client.
 
 - **Where.** The observed UI on 2026-10-03 was Plugins, Add, Create custom MCP server, with a Server URL,
   OAuth authentication, advanced OAuth settings and a custom-server trust acknowledgement. Set Server
