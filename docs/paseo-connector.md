@@ -1,8 +1,9 @@
 # Paseo Agent Connector (remote MCP)
 
-**Hosted-client compatibility: not verified.** No hosted MCP client (ChatGPT or OpenAI Dots, claude.ai,
-Claude Code, Grok) has been observed calling this server's tools. What has been tested is listed under
-[Evidence](#evidence). Do not rely on a particular client until its own check is recorded.
+**ChatGPT client smoke: core tool path verified in a user-reported test.** A ChatGPT agent on a MacBook
+called this server over public HTTPS and exercised launch, result retrieval, idempotency, follow-up and
+ownership isolation. Cancellation, revocation, refresh, OpenAI Dots and other clients remain unverified
+through that client. See [Evidence](#evidence) for the exact scope and provenance.
 
 ## What it is
 
@@ -334,23 +335,52 @@ Three kinds of evidence, which say different things:
    official MCP TypeScript SDK as the client. See [Local verification](#local-verification). The Claude
    Code there is the daemon-side coding agent that `start_agent` launched, not a hosted MCP client calling
    the connector.
-3. **Hosted-client integrations: unverified for every product.** No hosted client (ChatGPT or OpenAI Dots,
-   claude.ai, Claude Code as an MCP client, Grok) has linked to this server or invoked its tools.
+3. **Actual ChatGPT client: user-reported smoke.** The operator supplied an MCP transcript from a ChatGPT
+   agent on a MacBook using the public HTTPS test deployment at commit `df5fcd9`. See
+   [ChatGPT client smoke](#chatgpt-client-smoke). This is not proof of OpenAI Dots, other clients, or every
+   lifecycle behavior.
+
+### ChatGPT client smoke
+
+On 2026-10-03, the operator reported the following results from the installed ChatGPT connector. These
+are user-supplied execution evidence, not a separately rerun controller test. No enrollment, permission,
+connection or file changes were reported during the smoke; revocation was not run and the connection
+remained usable.
+
+| Check                   | Reported result      | Evidence and boundary                                                                                                                                                                                                                               |
+| ----------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Connection and runtimes | Partial verification | `lightning` online, selected directory and read/run/cancel scopes matched, Claude/Haiku 4.5 ready, initial agent list empty. Daemon-ID matching was not verifiable: `get_connection` returns only machine name and online state, not the daemon ID. |
+| Launch and result       | Pass                 | Real Claude/Haiku 4.5 agent in plan mode used `Read` on `probe.txt`, returned the exact probe line and finished idle.                                                                                                                               |
+| Launch idempotency      | Pass                 | Identical request key and arguments returned the same operation and agent; the connection still listed one agent.                                                                                                                                   |
+| Follow-up               | Pass                 | The same agent returned exactly `FOLLOWUP_OK`; cursor-based retrieval returned the new timeline entries.                                                                                                                                            |
+| Cancellation            | Not verified         | Runtime blocked standalone `sleep 30`; a subsequent action and the turn finished before the first state check. No running turn was observed and `cancel_agent` was not called. This does not establish a connector cancellation failure.            |
+| Ownership isolation     | Pass                 | An agent created directly on the daemon was absent from `list_agents`; direct `get_agent` returned `not_found` without disclosing a timeline.                                                                                                       |
+| Revocation              | Not run              | The connection was left usable.                                                                                                                                                                                                                     |
+
+Reported connection ID: `b028cf49-4c38-4d42-953a-a979a1a749ea`; smoke agent:
+`34ac2559-028f-4d09-8681-a723efdd9df0`; launch operation:
+`37620f06-7678-47d8-9b01-ae678088341e`. The exact file-read result was
+`PASEO_CONNECTOR_LIVE_PROBE=machine-read-confirmed`.
+
+This report does not verify refresh-token behavior, revocation through ChatGPT, cancellation through
+ChatGPT, or the operator's OpenAI Dots agent ("Dotty"). The separate local E2E evidence below covers
+server-side cancellation and revocation; it must not be substituted for the missing client checks.
 
 ## Client-specific examples
 
-These notes repeat only what each vendor's own documentation says, as read on 2026-10-01, and how that
-meets Hub's behaviour above. **Status for every one: not verified with this server.** Linking a client is
-not proof that it can call the tools; record a real tool call before relying on one.
+These vendor notes were read on 2026-10-01 and describe how documented behavior meets Hub's contract.
+The later user-reported ChatGPT smoke is recorded above; other clients remain unverified with this server.
+Linking alone is not proof that a client can call the tools.
 
 ### ChatGPT and OpenAI Dots
 
-Status: not verified with this server. (The operator's own Dots client, nicknamed "Dotty", is the first
-planned live test.)
+Status: a user-reported ChatGPT client smoke passed the core tool path on 2026-10-03. Cancellation and
+revocation through that client remain unverified. OpenAI Dots, including the operator's "Dotty", has not
+been exercised.
 
-- **Where.** In the operator's account, Plugins, Add offered Create MCP App, which opened a form with a
-  Server URL, OAuth authentication, advanced OAuth settings and a custom-server trust acknowledgement
-  (observed on 2026-09-30 without submitting). Set Server URL to `<origin>/mcp/paseo` and choose OAuth.
+- **Where.** The observed UI on 2026-10-03 was Plugins, Add, Create custom MCP server, with a Server URL,
+  OAuth authentication, advanced OAuth settings and a custom-server trust acknowledgement. Set Server
+  URL to `<origin>/mcp/paseo` and choose OAuth.
   OpenAI's docs place developer mode under Settings, Security and login, and say its "availability can
   depend on account and workspace policy"
   ([connect](https://developers.openai.com/apps-sdk/deploy/connect-chatgpt)).
