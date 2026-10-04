@@ -1,9 +1,9 @@
 # Paseo Agent Connector (remote MCP)
 
-**ChatGPT client smoke: core tool path verified in a user-reported test.** A ChatGPT agent on a MacBook
-called this server over public HTTPS and exercised launch, result retrieval, idempotency, follow-up and
-ownership isolation. Cancellation, revocation, refresh, OpenAI Dots and other clients remain unverified
-through that client. See [Evidence](#evidence) for the exact scope and provenance.
+**ChatGPT client smoke: core tool path and cancellation verified in user-reported tests.** A ChatGPT
+agent on a MacBook called this server over public HTTPS and exercised launch, result retrieval,
+idempotency, follow-up, cancellation and ownership isolation. Revocation, refresh, OpenAI Dots and other
+clients remain unverified through that client. See [Evidence](#evidence) for the exact scope and provenance.
 
 ## What it is
 
@@ -347,24 +347,36 @@ are user-supplied execution evidence, not a separately rerun controller test. No
 connection or file changes were reported during the smoke; revocation was not run and the connection
 remained usable.
 
-| Check                   | Reported result      | Evidence and boundary                                                                                                                                                                                                                               |
-| ----------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Connection and runtimes | Partial verification | `lightning` online, selected directory and read/run/cancel scopes matched, Claude/Haiku 4.5 ready, initial agent list empty. Daemon-ID matching was not verifiable: `get_connection` returns only machine name and online state, not the daemon ID. |
-| Launch and result       | Pass                 | Real Claude/Haiku 4.5 agent in plan mode used `Read` on `probe.txt`, returned the exact probe line and finished idle.                                                                                                                               |
-| Launch idempotency      | Pass                 | Identical request key and arguments returned the same operation and agent; the connection still listed one agent.                                                                                                                                   |
-| Follow-up               | Pass                 | The same agent returned exactly `FOLLOWUP_OK`; cursor-based retrieval returned the new timeline entries.                                                                                                                                            |
-| Cancellation            | Not verified         | Runtime blocked standalone `sleep 30`; a subsequent action and the turn finished before the first state check. No running turn was observed and `cancel_agent` was not called. This does not establish a connector cancellation failure.            |
-| Ownership isolation     | Pass                 | An agent created directly on the daemon was absent from `list_agents`; direct `get_agent` returned `not_found` without disclosing a timeline.                                                                                                       |
-| Revocation              | Not run              | The connection was left usable.                                                                                                                                                                                                                     |
+| Check                   | Reported result      | Evidence and boundary                                                                                                                                                                                                                                           |
+| ----------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Connection and runtimes | Partial verification | `lightning` online, selected directory and read/run/cancel scopes matched, Claude/Haiku 4.5 ready, initial agent list empty. Daemon-ID matching was not verifiable: `get_connection` returns only machine name and online state, not the daemon ID.             |
+| Launch and result       | Pass                 | Real Claude/Haiku 4.5 agent in plan mode used `Read` on `probe.txt`, returned the exact probe line and finished idle.                                                                                                                                           |
+| Launch idempotency      | Pass                 | Identical request key and arguments returned the same operation and agent; the connection still listed one agent.                                                                                                                                               |
+| Follow-up               | Pass                 | The same agent returned exactly `FOLLOWUP_OK`; cursor-based retrieval returned the new timeline entries.                                                                                                                                                        |
+| Cancellation            | Pass in follow-up    | A running, partially streamed count was observed at 23. `cancel_agent` returned `cancelRequested: true`; the agent became idle at 380 of 3000 and remained accessible. After about 3 seconds, cursor-based retrieval returned no entries and `hasNewer: false`. |
+| Ownership isolation     | Pass                 | An agent created directly on the daemon was absent from `list_agents`; direct `get_agent` returned `not_found` without disclosing a timeline.                                                                                                                   |
+| Revocation              | Not run              | The connection was left usable.                                                                                                                                                                                                                                 |
 
 Reported connection ID: `b028cf49-4c38-4d42-953a-a979a1a749ea`; smoke agent:
 `34ac2559-028f-4d09-8681-a723efdd9df0`; launch operation:
 `37620f06-7678-47d8-9b01-ae678088341e`. The exact file-read result was
 `PASEO_CONNECTOR_LIVE_PROBE=machine-read-confirmed`.
 
-This report does not verify refresh-token behavior, revocation through ChatGPT, cancellation through
-ChatGPT, or the operator's OpenAI Dots agent ("Dotty"). The separate local E2E evidence below covers
-server-side cancellation and revocation; it must not be substituted for the missing client checks.
+The initial sleep-based cancellation attempt was not verified: the runtime blocked standalone
+`sleep 30` and the turn finished before observation. In a subsequent user-reported test, the task was
+to count from 1 to 3000, one number per line, without tools or file changes. That test directly exercised
+`cancel_agent` while the turn was running and passed the interruption, session-accessibility and
+no-further-output checks above.
+
+Reported cancellation agent: `4a49b22b-f919-4576-90ef-4ab54d8c85af`; request key:
+`d7e9f3e7-73c4-4a60-a6c8-219f4f940a33`; operation:
+`db082bf6-54e5-41df-8379-2cb463e4d767`. The runtime was `claude-haiku-4-5` in `plan` mode. The final cursor
+was epoch `79396709-aff1-4582-a348-dc289e0bfc88`, sequence 66; the later read after that cursor returned
+`entries: []` and `hasNewer: false`.
+
+These reports do not verify refresh-token behavior, revocation through ChatGPT, or the operator's OpenAI
+Dots agent ("Dotty"). The separate local E2E evidence below covers server-side revocation; it must not be
+substituted for the missing client checks.
 
 ## Client-specific examples
 
@@ -374,9 +386,9 @@ Linking alone is not proof that a client can call the tools.
 
 ### ChatGPT and OpenAI Dots
 
-Status: a user-reported ChatGPT client smoke passed the core tool path on 2026-10-03. Cancellation and
-revocation through that client remain unverified. OpenAI Dots, including the operator's "Dotty", has not
-been exercised.
+Status: user-reported ChatGPT client tests passed the core tool path and active-turn cancellation.
+Revocation and refresh through that client remain unverified. OpenAI Dots, including the operator's
+"Dotty", has not been exercised.
 
 - **Where.** The observed UI on 2026-10-03 was Plugins, Add, Create custom MCP server, with a Server URL,
   OAuth authentication, advanced OAuth settings and a custom-server trust acknowledgement. Set Server
