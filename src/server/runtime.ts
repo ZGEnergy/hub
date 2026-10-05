@@ -103,7 +103,7 @@ export interface ApplicationRuntime {
   browserAccount?(request: Request): Promise<Response>;
   signInEmail?: AuthServer["signInEmail"];
   signUpEmail?: AuthServer["signUpEmail"];
-  sendVerificationEmail?(email: string, headers: Headers, invitationId?: string): Promise<void>;
+  sendVerificationEmail?: AuthServer["sendVerificationEmail"];
   requestPasswordReset?(email: string, headers: Headers): Promise<void>;
   resetPassword?(data: { token: string; newPassword: string }, headers: Headers): Promise<void>;
   signOut?(headers: Headers): Promise<void>;

@@ -182,11 +182,11 @@ async function createOwnedApplicationRuntime(
       }
       return options.auth.signUpEmail(data, headers, invitationId);
     },
-    sendVerificationEmail(email, headers, invitationId) {
+    sendVerificationEmail(email, headers, invitationId, oauthQuery) {
       if (options.database === null || options.auth?.sendVerificationEmail === undefined) {
         return Promise.reject(new Error("auth unavailable"));
       }
-      return options.auth.sendVerificationEmail(email, headers, invitationId);
+      return options.auth.sendVerificationEmail(email, headers, invitationId, oauthQuery);
     },
     requestPasswordReset(email, headers) {
       if (options.database === null || options.auth?.requestPasswordReset === undefined) {

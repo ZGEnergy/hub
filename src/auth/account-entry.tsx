@@ -196,7 +196,8 @@ function AccountAuthenticationEntry({
     return (
       <VerificationPendingEntry
         email={verificationEmail}
-        {...(account.invitation?.id === undefined ? {} : { invitation: account.invitation.id })}
+        {...(invitationId === undefined ? {} : { invitation: invitationId })}
+        {...(oauthRequest === undefined ? {} : { oauthQuery: oauthRequest.query })}
         onBack={showSignIn}
       />
     );

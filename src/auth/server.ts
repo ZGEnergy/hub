@@ -84,7 +84,12 @@ export interface AuthServer {
     headers: Headers,
     invitationId?: string,
   ): Promise<AccountAuthentication>;
-  sendVerificationEmail?(email: string, headers: Headers, invitationId?: string): Promise<void>;
+  sendVerificationEmail?(
+    email: string,
+    headers: Headers,
+    invitationId?: string,
+    oauthQuery?: string,
+  ): Promise<void>;
   requestPasswordReset?(email: string, headers: Headers): Promise<void>;
   resetPassword?(data: { token: string; newPassword: string }, headers: Headers): Promise<void>;
   signOut?(headers: Headers): Promise<void>;
@@ -428,10 +433,10 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
       );
       return { state, redirectTo };
     },
-    async sendVerificationEmail(email, headers, invitationId) {
+    async sendVerificationEmail(email, headers, invitationId, oauthQuery) {
       requireBrowserOrigin(headers, headersBrowserOrigin(headers, browserOrigin));
       await auth.api.sendVerificationEmail({
-        body: { email, callbackURL: accountCallback(options.baseURL, invitationId) },
+        body: { email, callbackURL: signupCallback(oauthQuery, invitationId) },
         headers,
       });
     },

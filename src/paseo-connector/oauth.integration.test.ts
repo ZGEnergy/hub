@@ -441,68 +441,89 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
     });
   });
 
-  it("completes explicit prompt=create only after required email verification", async () => {
-    const verifications: { url: string }[] = [];
-    const verifiedAuth = createAuthServer({
-      database: bundle.runtime,
-      locks: bundle.locks,
-      entitlements: composeEntitlements(database, bundle.runtime).service,
-      secret: "connector-oauth-test-secret-at-least-32-characters",
-      baseURL: ORIGIN,
-      policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
-      accountMailer: {
-        sendVerificationEmail: async (email) => {
-          verifications.push({ url: email.url });
+  it.each(["initial", "resent"] as const)(
+    "completes explicit prompt=create with the %s verification email",
+    async (verification) => {
+      const verifications: { url: string }[] = [];
+      const verifiedEntitlements = composeEntitlements(database, bundle.runtime);
+      const verifiedAuth = createAuthServer({
+        database: bundle.runtime,
+        locks: bundle.locks,
+        entitlements: verifiedEntitlements.service,
+        secret: "connector-oauth-test-secret-at-least-32-characters",
+        baseURL: ORIGIN,
+        policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+        accountMailer: {
+          sendVerificationEmail: async (email) => {
+            verifications.push({ url: email.url });
+          },
+          sendPasswordReset: () => Promise.resolve(),
         },
-        sendPasswordReset: () => Promise.resolve(),
-      },
-      paseoConnector: true,
-    });
-    const browser = new Browser(verifiedAuth);
-    const clientId = await registerClient();
-    const request = await authorization(browser, clientId, undefined, "create");
-    expect(
-      await browser.rawPost("/api/auth/sign-up/email", {
-        name: "Verified operator",
-        email: browser.email,
-        password: "account-password",
-        oauth_query: request.connectQuery,
-      }),
-    ).toBe(200);
-    await expect(verifiedAuth.connector!.listMachines(browser.headers())).rejects.toMatchObject({
-      code: "unauthenticated",
-    });
-    expect(
-      await browser.rawPost("/api/auth/sign-in/email", {
-        email: browser.email,
-        password: "account-password",
-        oauth_query: request.connectQuery,
-      }),
-    ).toBe(403);
-    expect(verifications).toHaveLength(1);
-    const connectQuery = await browser.verifyOAuth(verifications[0]!.url);
-    const machine = await enroll(await browser.createOrganization());
-    const consent = await select(browser, connectQuery.search, machine);
-    expect(await verifiedAuth.connector!.listConnections(browser.headers())).toEqual([]);
-    const approved = await verifiedAuth.connector!.decideConsent(
-      { ...consent, accept: true },
-      browser.headers(),
-    );
-    const callback = new URL(approved.redirectTo);
-    expect(callback.searchParams.get("state")).toBe(request.state);
-    const tokens = await exchange(
-      clientId,
-      callback.searchParams.get("code") ?? "",
-      request.verifier,
-    );
-    expect(
-      await authorizeConnectorRequest(database, await principalOf(tokens), "paseo:run"),
-    ).toMatchObject({
-      ownerUserId: await browser.userId(),
-      daemonId: machine,
-    });
-    await verifiedAuth.close();
-  });
+        paseoConnector: true,
+      });
+      const browser = new Browser(verifiedAuth);
+      const clientId = await registerClient();
+      const request = await authorization(browser, clientId, undefined, "create");
+      expect(
+        await browser.rawPost("/api/auth/sign-up/email", {
+          name: "Verified operator",
+          email: browser.email,
+          password: "account-password",
+          oauth_query: request.connectQuery,
+        }),
+      ).toBe(200);
+      await expect(verifiedAuth.connector!.listMachines(browser.headers())).rejects.toMatchObject({
+        code: "unauthenticated",
+      });
+      expect(
+        await browser.rawPost("/api/auth/sign-in/email", {
+          email: browser.email,
+          password: "account-password",
+          oauth_query: request.connectQuery,
+        }),
+      ).toBe(403);
+      expect(verifications).toHaveLength(1);
+      if (verification === "resent") {
+        const application = await createApplicationRuntime({
+          database,
+          auth: verifiedAuth,
+          entitlements: verifiedEntitlements.service,
+          billing: null,
+          close: () => Promise.resolve(),
+        });
+        await application.sendVerificationEmail!(
+          browser.email,
+          browser.headers(),
+          undefined,
+          request.connectQuery,
+        );
+        await application.stop();
+      }
+      const connectQuery = await browser.verifyOAuth(verifications.at(-1)!.url);
+      const machine = await enroll(await browser.createOrganization());
+      const consent = await select(browser, connectQuery.search, machine);
+      expect(await verifiedAuth.connector!.listConnections(browser.headers())).toEqual([]);
+      const approved = await verifiedAuth.connector!.decideConsent(
+        { ...consent, accept: true },
+        browser.headers(),
+      );
+      const callback = new URL(approved.redirectTo);
+      expect(callback.searchParams.get("state")).toBe(request.state);
+      const tokens = await exchange(
+        clientId,
+        callback.searchParams.get("code") ?? "",
+        request.verifier,
+      );
+      expect(
+        await authorizeConnectorRequest(database, await principalOf(tokens), "paseo:run"),
+      ).toMatchObject({
+        ownerUserId: await browser.userId(),
+        daemonId: machine,
+      });
+      await verifiedAuth.close();
+      await verifiedEntitlements.close();
+    },
+  );
 
   it("does not let an older account's verification satisfy prompt=create", async () => {
     const verifications: { url: string }[] = [];
@@ -551,10 +572,11 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
     async (requiresVerification) => {
       const owner = await operator();
       const verifications: { url: string }[] = [];
+      const invitedEntitlements = composeEntitlements(database, bundle.runtime);
       const invitedAuth = createAuthServer({
         database: bundle.runtime,
         locks: bundle.locks,
-        entitlements: composeEntitlements(database, bundle.runtime).service,
+        entitlements: invitedEntitlements.service,
         secret: "connector-oauth-test-secret-at-least-32-characters",
         baseURL: ORIGIN,
         policy: {
@@ -590,8 +612,24 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
       const clientId = await registerClient();
       const request = await authorization(browser, clientId, undefined, "create");
       const signup = await browser.signupWithInvitation(request.connectQuery, invitationId);
+      if (requiresVerification) {
+        const application = await createApplicationRuntime({
+          database,
+          auth: invitedAuth,
+          entitlements: invitedEntitlements.service,
+          billing: null,
+          close: () => Promise.resolve(),
+        });
+        await application.sendVerificationEmail!(
+          browser.email,
+          browser.headers(),
+          invitationId,
+          request.connectQuery,
+        );
+        await application.stop();
+      }
       const connect = requiresVerification
-        ? await browser.verifyOAuth(verifications[0]!.url)
+        ? await browser.verifyOAuth(verifications.at(-1)!.url)
         : new URL(z.object({ url: z.string() }).parse(await signup.json()).url, ORIGIN);
       expect(await invitedAuth.connector!.listMachines(browser.headers())).toEqual([]);
       const carriedInvitation = new URLSearchParams(connect.hash.slice(1)).get("invitation") ?? "";
@@ -626,6 +664,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
         organizationId: owner.organizationId,
       });
       await invitedAuth.close();
+      await invitedEntitlements.close();
     },
   );
 

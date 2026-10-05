@@ -86,10 +86,12 @@ export function ForgotPasswordEntry({ onBack }: { onBack: () => void }) {
 export function VerificationPendingEntry({
   email,
   invitation,
+  oauthQuery,
   onBack,
 }: {
   email: string;
   invitation?: string;
+  oauthQuery?: string;
   onBack: () => void;
 }) {
   const resend = useMutation({
@@ -98,8 +100,15 @@ export function VerificationPendingEntry({
     ) => Promise<EmptyResult>,
   });
   const resendEmail = useCallback(
-    () => resend.mutate({ data: { email, ...(invitation === undefined ? {} : { invitation }) } }),
-    [email, invitation, resend],
+    () =>
+      resend.mutate({
+        data: {
+          email,
+          ...(invitation === undefined ? {} : { invitation }),
+          ...(oauthQuery === undefined ? {} : { oauthQuery }),
+        },
+      }),
+    [email, invitation, oauthQuery, resend],
   );
   const message =
     resend.isError || resend.data?.status === "error"

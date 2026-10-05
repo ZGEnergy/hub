@@ -27,6 +27,7 @@ const signUpSchema = authenticationSchema.extend({
 const emailSchema = z.object({
   email: z.string().email(),
   invitation: z.string().min(1).optional(),
+  oauthQuery: z.string().min(1).optional(),
 });
 const resetPasswordSchema = z.object({
   token: z.string().min(1),
@@ -166,7 +167,12 @@ export const sendVerificationEmail = createServerFn({ method: "POST" })
     try {
       const application = await getApplication();
       if (application.sendVerificationEmail === undefined) throw new Error("auth unavailable");
-      await application.sendVerificationEmail(data.email, getRequest().headers, data.invitation);
+      await application.sendVerificationEmail(
+        data.email,
+        getRequest().headers,
+        data.invitation,
+        data.oauthQuery,
+      );
       return respondOk({});
     } catch (error) {
       return respondWithFailure(error, accountContext("auth.email_verification.send"), {

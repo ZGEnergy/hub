@@ -107,6 +107,9 @@ them cannot link.
 - **A browser.** The user signs in to Hub, picks the machine and directory, and approves in a browser. The
   authorization request must be a top-level browser navigation; a non-navigation request (for example a
   script `fetch`) gets a JSON answer instead of the redirect to the sign-in page.
+  If signup requires email verification, both the initial message and **Resend verification email**
+  preserve the signed app-linking request. Follow the verification link to resume machine selection;
+  organization invitations still require explicit acceptance before they grant access.
 - **`iss` in the authorization response (RFC 9207).** Hub adds `iss=<origin>` to the redirect back to the
   client, and advertises it in the metadata. Clients that check it should compare it with the metadata
   `issuer`.
