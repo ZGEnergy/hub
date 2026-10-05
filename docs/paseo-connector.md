@@ -405,6 +405,34 @@ It does not independently verify Dotty-specific follow-up, idempotency, cancella
 revocation or refresh behavior. The broader ChatGPT smoke above is distinct evidence, not a substitute
 for those unexercised Dotty-specific checks.
 
+### Stable endpoint cutover (2026-10-05)
+
+With operator approval, the existing live-test Hub was migrated from its temporary Cloudflare quick
+tunnel to `https://paseo.zgenergy.app`. The MCP URL is `https://paseo.zgenergy.app/mcp/paseo`.
+The named Cloudflare Tunnel forwards to the same loopback-only Hub and preserves its embedded database.
+The old quick tunnel was stopped after verification. The Hub and named tunnel are persistent processes
+on the original machine; this is not a claim of reboot recovery or a separate production hosting service.
+
+The isolated daemon's previous Hub relationship was replaced with enrollment at the stable origin.
+Its new daemon ID is `7f51dedf-2f1e-4a78-9c64-86af9a0b88b0`, displayed as `lightning-7f51dedf`.
+CLI status reported it connected with `hub.execute` and no error. The normal user daemon was not migrated.
+
+Controller-observed smoke evidence through the public HTTPS hostname:
+
+- Protected-resource and authorization-server discovery advertise the stable resource and issuer;
+  JWKS is available and unauthenticated MCP requests receive the correct `401` challenge.
+- A fresh dynamically registered public client completed browser consent and authorization-code exchange
+  with PKCE. Authenticated MCP initialization, `get_connection` and `list_runtimes` succeeded.
+- The read-only smoke connection reported the migrated machine online, the same isolated test directory,
+  and Claude ready. It was revoked after the check; its bearer token then received `401 invalid_token`.
+  No agents were launched and no project files were changed by this cutover smoke.
+
+The issuer/resource change requires ChatGPT and Dotty to link again at the new URL. The earlier
+user-reported lifecycle tests remain evidence for the previous endpoint, not proof of a hosted-client
+relink at this one. A new connection does not inherit agents owned by an earlier connection.
+Hosted-client relinking and refresh remain unverified. PR integration, CI and dependency-security
+release gates are unchanged.
+
 ## Client-specific examples
 
 These vendor notes were read on 2026-10-01 and describe how documented behavior meets Hub's contract.
