@@ -1,5 +1,5 @@
 import { spawn, execFile, type ChildProcess } from "node:child_process";
-import { createConnection, createServer as createNetServer } from "node:net";
+import { createServer as createNetServer } from "node:net";
 import { rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -147,6 +147,23 @@ export class SourcePaseo {
     return provider;
   }
 
+  /** The daemon's own view of one agent, as `paseo agent inspect --json` reports it. */
+  async inspectAgent(agentId: string): Promise<Record<string, unknown>> {
+    return this.run(["agent", "inspect", agentId, "--host", this.paths.daemonHost, "--json"]);
+  }
+
+  /** Every agent the daemon holds, in every directory, archived ones included. */
+  async listAgents(): Promise<Record<string, unknown>[]> {
+    const result = await runCommand(
+      join(this.paths.packagesRoot, "node_modules/.bin/paseo"),
+      ["agent", "ls", "--all", "--global", "--host", this.paths.daemonHost, "--json"],
+      this.paths.packagesRoot,
+      sourceEnvironment(this.paths.paseoHome),
+    );
+    const parsed = cliResultSchema.parse(JSON.parse(result.stdout));
+    return Array.isArray(parsed) ? parsed : [parsed];
+  }
+
   async processDescriptions(): Promise<string[]> {
     return describeProcesses(await processFamily(this.daemon?.pid));
   }
@@ -266,7 +283,7 @@ export class SourcePaseo {
     daemon.stderr?.on("data", record);
     this.daemon = daemon;
     await observe(
-      async () => canConnect(this.paths.daemonHost),
+      async () => acceptsSessions(this.paths.daemonHost),
       "source daemon readiness",
       daemon,
     ).catch((error: unknown) => {
@@ -365,7 +382,13 @@ export function sourceEnvironment(paseoHome: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
     PASEO_AGENT_ID: undefined,
+    PASEO_AGENT_CWD: undefined,
     PASEO_WORKSPACE_ID: undefined,
+    // A harness launched from inside a managed daemon's agent must not attest that daemon's lifecycle.
+    PASEO_LIFECYCLE_MANAGER: undefined,
+    PASEO_LIFECYCLE_DESCRIPTOR: undefined,
+    PASEO_LIFECYCLE_SOURCE_REVISION: undefined,
+    PASEO_LIFECYCLE_CLOSURE_ROOT: undefined,
     PASEO_HOME: paseoHome,
     PASEO_NODE_INSPECT: "0",
     PASEO_PAIRING_QR: "0",
@@ -409,16 +432,27 @@ async function observe(
   throw new Error(`Timed out waiting for ${description}`);
 }
 
-async function canConnect(host: string): Promise<boolean> {
-  const [hostname, portText] = host.split(":");
-  const port = Number(portText);
-  return new Promise<boolean>((resolveConnection) => {
-    const socket = createConnection({ host: hostname, port });
-    socket.once("connect", () => {
-      socket.destroy();
-      resolveConnection(true);
+/**
+ * The daemon listens before it accepts sessions and answers upgrades 503 until then, so a bare
+ * TCP connect is not readiness: any upgrade answer other than 503 is.
+ */
+async function acceptsSessions(host: string): Promise<boolean> {
+  return new Promise<boolean>((resolveReadiness) => {
+    const socket = new WebSocket(`ws://${host}/ws`);
+    let settled = false;
+    const settle = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.terminate();
+      resolveReadiness(ready);
+    };
+    socket.once("open", () => settle(true));
+    socket.once("unexpected-response", (_request, response) => {
+      response.destroy();
+      settle(response.statusCode !== 503);
     });
-    socket.once("error", () => resolveConnection(false));
+    // Terminating a socket mid-handshake emits a late error; keep listening so it is never unhandled.
+    socket.on("error", () => settle(false));
   });
 }
 

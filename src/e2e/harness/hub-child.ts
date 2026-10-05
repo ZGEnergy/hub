@@ -17,6 +17,7 @@ import { loadBuiltStartServer } from "../../server/build.js";
 import { createAuthServer } from "../../auth/server.js";
 import { composeEntitlements } from "../../auth/entitlements.js";
 import { readInstanceAuthPolicy } from "../../auth/instance-policy.js";
+import { readPaseoConnectorEnabled } from "../../paseo-connector/oauth.js";
 import { OrganizationResources } from "../../organizations/resources.js";
 import { parseProjectConfiguration, ProjectConfigurationStore } from "../../configuration/store.js";
 import { hashTemplate, UNLIMITED_TEMPLATE } from "../../entitlements/catalog.js";
@@ -75,6 +76,7 @@ async function main(): Promise<void> {
     baseURL: requiredEnvironment("PASEO_HUB_APP_URL"),
     secret: requiredEnvironment("PASEO_HUB_AUTH_SECRET"),
     policy: readInstanceAuthPolicy(process.env),
+    paseoConnector: readPaseoConnectorEnabled(process.env),
   });
   await auth.initialize?.();
   const createdApiKey = await auth.apiKeys?.create(
@@ -115,6 +117,15 @@ async function main(): Promise<void> {
     daemon = enrollment?.status === "slug_conflict" ? undefined : enrollment;
   }
   if (daemon === undefined) throw new Error("Hub E2E seed daemon enrollment failed");
+  if (process.env["HUB_E2E_PRODUCTION_RUNTIME"] === "1") {
+    // Everything that serves requests is the built production app. It shares the organization,
+    // account and key seed above, but not the test configuration, which it would migrate on boot.
+    await auth.close();
+    await entitlements.close();
+    await database.close();
+    await serveProductionRuntime(port);
+    return;
+  }
   const config = await configuration.insertManualBundleRevision({
     files: configurationBundleFixture(
       dump({
@@ -248,6 +259,7 @@ async function main(): Promise<void> {
     operatorConsole: null,
     providerApplications: null,
     testTriggerRoutes: true,
+    paseoConnector: { status: "disabled" },
     auth: (request) => auth.handle(request),
     browserAccount: (request) => auth.browserAccount!(request),
     signInEmail: (data, headers) => auth.signInEmail!(data, headers),
@@ -303,6 +315,39 @@ async function main(): Promise<void> {
         process.exit(1);
       },
     );
+  process.once("SIGTERM", stop);
+  process.once("SIGINT", stop);
+}
+
+/**
+ * The self-hosted entry point's own composition, as `src/index.ts` serves it: the built start
+ * server's production runtime behind the canonical public origin, with daemon upgrades.
+ */
+async function serveProductionRuntime(port: number): Promise<void> {
+  const start = await loadBuiltStartServer();
+  await start.startProductionRuntime();
+  const server = createFetchServer((request) => start.default.fetch(request), {
+    canonicalRequestOrigin: requiredEnvironment("PASEO_HUB_APP_URL"),
+  });
+  server.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+    start.handleDaemonUpgrade(request, socket, head).catch(() => socket.destroy());
+  });
+  server.listen(port, "127.0.0.1");
+  const stop = () => {
+    const listenerClosed = new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    server.closeAllConnections();
+    void Promise.all([listenerClosed, start.stopProductionRuntime()]).then(
+      () => process.exit(0),
+      (error: unknown) => {
+        process.stderr.write(
+          `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+        );
+        process.exit(1);
+      },
+    );
+  };
   process.once("SIGTERM", stop);
   process.once("SIGINT", stop);
 }

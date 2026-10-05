@@ -336,6 +336,37 @@ describe("account and organization boundary", () => {
     assert.equal((await alice.requireActiveState()).organization.id === acme, false);
   });
 
+  it("opens no OAuth endpoint unless the operator enabled the connector", async () => {
+    const hub = await startAccounts(postgres);
+    const alice = await hub.signUp("Alice", "alice@example.com");
+    const statuses = await alice.connectorOAuthStatuses();
+
+    for (const [path, status] of Object.entries(statuses)) {
+      assert.equal(status, 404, path);
+    }
+  });
+
+  it("opens only the connector's OAuth client endpoints and keeps consent and client management closed", async () => {
+    const hub = await startAccounts(postgres, undefined, true);
+    const alice = await hub.signUp("Alice", "alice@example.com");
+    const statuses = await alice.connectorOAuthStatuses();
+
+    for (const path of [
+      "GET /api/auth/jwks",
+      "GET /api/auth/oauth2/authorize",
+      "POST /api/auth/oauth2/token",
+      "POST /api/auth/oauth2/register",
+      "POST /api/auth/oauth2/revoke",
+    ]) {
+      assert.notEqual(statuses[path], 404, path);
+    }
+    assert.equal(statuses["GET /api/auth/jwks"], 200);
+    for (const [path, status] of Object.entries(statuses)) {
+      if (!path.startsWith("closed ")) continue;
+      assert.equal(status, 404, path);
+    }
+  });
+
   it("rejects expired invitations and invalid stored roles at the request edge", async () => {
     const hub = await startAccounts(postgres);
     const alice = await hub.signUp("Alice", "alice@example.com");
@@ -370,8 +401,9 @@ const activeAccounts: PaseoAccounts[] = [];
 async function startAccounts(
   postgres: StartedPostgreSqlContainer,
   invitationMailer?: InvitationMailer,
+  paseoConnector = false,
 ): Promise<PaseoAccounts> {
-  const accounts = await PaseoAccounts.start(postgres, invitationMailer);
+  const accounts = await PaseoAccounts.start(postgres, invitationMailer, paseoConnector);
   activeAccounts.push(accounts);
   return accounts;
 }
@@ -395,6 +427,7 @@ class PaseoAccounts {
   static async start(
     postgres: StartedPostgreSqlContainer,
     invitationMailer?: InvitationMailer,
+    paseoConnector = false,
   ): Promise<PaseoAccounts> {
     const url = isolatedDatabaseUrl(postgres);
     const database = await createDatabase(url);
@@ -410,6 +443,7 @@ class PaseoAccounts {
         secret: "phase-one-auth-secret-at-least-32-characters",
         baseURL: "http://localhost:3000",
         policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+        paseoConnector,
         ...(invitationMailer === undefined ? {} : { invitationMailer }),
       }),
     );
@@ -888,6 +922,57 @@ class AccountBrowser {
     ];
     const responses = await Promise.all(paths.map((path) => this.post(path, {})));
     return responses.map(({ status }) => status);
+  }
+
+  async connectorOAuthStatuses(): Promise<Record<string, number>> {
+    const open = {
+      "GET /api/auth/jwks": () => this.get("/api/auth/jwks"),
+      "GET /api/auth/oauth2/authorize": () =>
+        this.get("/api/auth/oauth2/authorize?response_type=code&client_id=unknown"),
+      "POST /api/auth/oauth2/token": () =>
+        this.post("/api/auth/oauth2/token", { grant_type: "authorization_code" }),
+      "POST /api/auth/oauth2/register": () => this.post("/api/auth/oauth2/register", {}),
+      "POST /api/auth/oauth2/revoke": () => this.post("/api/auth/oauth2/revoke", {}),
+    };
+    const closedPosts = [
+      "/api/auth/oauth2/continue",
+      "/api/auth/oauth2/consent",
+      "/api/auth/oauth2/introspect",
+      "/api/auth/oauth2/create-client",
+      "/api/auth/oauth2/update-client",
+      "/api/auth/oauth2/delete-client",
+      "/api/auth/oauth2/client/rotate-secret",
+      "/api/auth/oauth2/update-consent",
+      "/api/auth/oauth2/delete-consent",
+      "/api/auth/oauth2/public-client-prelogin",
+      "/api/auth/admin/oauth2/create-client",
+      "/api/auth/jwks",
+    ];
+    const closedGets = [
+      "/api/auth/token",
+      "/api/auth/oauth2/userinfo",
+      "/api/auth/oauth2/get-client",
+      "/api/auth/oauth2/get-clients",
+      "/api/auth/oauth2/public-client",
+      "/api/auth/oauth2/get-consent",
+      "/api/auth/oauth2/get-consents",
+      "/api/auth/oauth2/end-session",
+      "/api/auth/oauth2/token",
+      "/api/auth/.well-known/oauth-authorization-server",
+    ];
+    const requests: Array<[string, () => Promise<Response>]> = [
+      ...Object.entries(open),
+      ...closedPosts.map((path): [string, () => Promise<Response>] => [
+        `closed POST ${path}`,
+        () => this.post(path, {}),
+      ]),
+      ...closedGets.map((path): [string, () => Promise<Response>] => [
+        `closed GET ${path}`,
+        () => this.get(path),
+      ]),
+    ];
+    const statuses = await Promise.all(requests.map(async ([, send]) => (await send()).status));
+    return Object.fromEntries(requests.map(([name], index) => [name, statuses[index]!]));
   }
 
   async resourcePresence(ids: ResourceIds): Promise<string[]> {

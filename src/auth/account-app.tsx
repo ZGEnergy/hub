@@ -3,7 +3,12 @@ import { useServerFn } from "@tanstack/react-start";
 import { useCallback, useState } from "react";
 import { accountState } from "./functions.js";
 import { DaemonHandoffEntry } from "../daemons/handoff.js";
-import { AccountEntry, InvitationEntry, OrganizationGate } from "./account-entry.js";
+import {
+  AccountEntry,
+  InvitationEntry,
+  OrganizationGate,
+  readConnectorAuthenticationRequest,
+} from "./account-entry.js";
 import { FailedEntry, LoadingEntry, UnavailableInvitation } from "./account-states.js";
 import { DashboardShell } from "../shell/dashboard-shell.js";
 import { InstanceSetupEntry } from "./instance-setup-entry.js";
@@ -27,9 +32,8 @@ function AccountApplication() {
   const [handoff, setHandoff] = useState(false);
   const enterHandoff = useCallback(() => setHandoff(true), []);
   const leaveHandoff = useCallback(() => setHandoff(false), []);
-  const search =
-    typeof window === "undefined" ? undefined : new URLSearchParams(window.location.search);
-  const invitation = search?.get("invitation") ?? undefined;
+  const oauthRequest = readConnectorAuthenticationRequest();
+  const invitation = readAccountInvitation(oauthRequest !== undefined);
   const account = useQuery({
     queryKey: ["account", invitation],
     queryFn: () => loadAccount({ data: invitation === undefined ? {} : { invitation } }),
@@ -60,6 +64,9 @@ function AccountApplication() {
   if (state.status === "instanceSetupRequired") return <InstanceSetupEntry />;
   if (state.status === "passwordChangeRequired")
     return <PasswordChangeEntry account={state.account} />;
+  if (oauthRequest?.prompt !== undefined && state.status !== "signedOut") {
+    return <ConnectorAuthenticationEntry invitation={invitation} />;
+  }
   if (state.status === "appSetupRequired") {
     return <AppSetupEntry organizationId={state.organization.id} onLeft={enterHandoff} />;
   }
@@ -72,6 +79,39 @@ function AccountApplication() {
   }
   if (state.status === "organizationRequired") return <OrganizationGate account={state} />;
   return <DashboardShell account={state} />;
+}
+
+function readAccountInvitation(connectorRequest: boolean): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  const invitation = new URLSearchParams(window.location.search).get("invitation");
+  if (invitation !== null) return invitation;
+  if (!connectorRequest) return undefined;
+  return new URLSearchParams(window.location.hash.slice(1)).get("invitation") ?? undefined;
+}
+
+function ConnectorAuthenticationEntry({ invitation }: { invitation: string | undefined }) {
+  const loadAccount = useServerFn(accountState);
+  const authentication = useQuery({
+    queryKey: ["account", "connector-authentication", invitation],
+    queryFn: () =>
+      loadAccount({
+        data: { authenticationView: true, ...(invitation === undefined ? {} : { invitation }) },
+      }),
+  });
+  if (authentication.isPending) return <LoadingEntry />;
+  if (authentication.isError || authentication.data.status === "error") {
+    return <FailedEntry message="Hub couldn't load the authentication policy. Reload the page." />;
+  }
+  const entry = authentication.data.data;
+  if (entry.status !== "signedOut") {
+    return (
+      <FailedEntry message="This authorization request cannot create or authenticate an account." />
+    );
+  }
+  if (entry.invitationUnavailable === true) {
+    return <UnavailableInvitation message="This invitation is unavailable." />;
+  }
+  return <AccountEntry account={entry} />;
 }
 
 type AuthCallback =

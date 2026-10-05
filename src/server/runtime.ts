@@ -18,6 +18,10 @@ import type { UsageDashboard } from "../usage/dashboard.js";
 import type { ProviderApplications } from "../provider-applications/index.js";
 import type { DaemonProviderCatalog } from "../daemons/provider-catalog.js";
 import type { HomeDashboard } from "../home/dashboard.js";
+import type { Database } from "../db/types.js";
+import type { ConnectorOAuthService } from "../paseo-connector/flow.js";
+import type { ConnectorService } from "../paseo-connector/service.js";
+import type { AuthServer } from "../auth/server.js";
 
 /**
  * The public plan catalog shape is billing's own: `src/billing/public-catalog.ts` decides which
@@ -61,6 +65,19 @@ export class BillingForbiddenError extends Error {
   }
 }
 
+/** The Paseo Agent Connector: 503 without a database, 404 when the public origin is neither HTTPS nor
+ * loopback, otherwise its OAuth surface, the database its authorization reads, and the owned-agent
+ * service that reaches daemons through the app's own connection resolver. */
+export type PaseoConnectorAccess =
+  | { status: "database_unavailable" }
+  | { status: "disabled" }
+  | {
+      status: "enabled";
+      oauth: ConnectorOAuthService;
+      database: Database;
+      service: ConnectorService;
+    };
+
 export interface ApplicationRuntime {
   hub: HubRuntime;
   operations: HubOperations;
@@ -81,15 +98,12 @@ export interface ApplicationRuntime {
   operatorConsole: OperatorConsole | null;
   providerApplications: ProviderApplications | null;
   testTriggerRoutes: boolean;
+  paseoConnector: PaseoConnectorAccess;
   auth(request: Request): Promise<Response>;
   browserAccount?(request: Request): Promise<Response>;
-  signInEmail?(data: { email: string; password: string }, headers: Headers): Promise<"complete">;
-  signUpEmail?(
-    data: { name: string; email: string; password: string },
-    headers: Headers,
-    invitationId?: string,
-  ): Promise<"complete" | "verificationRequired">;
-  sendVerificationEmail?(email: string, headers: Headers, invitationId?: string): Promise<void>;
+  signInEmail?: AuthServer["signInEmail"];
+  signUpEmail?: AuthServer["signUpEmail"];
+  sendVerificationEmail?: AuthServer["sendVerificationEmail"];
   requestPasswordReset?(email: string, headers: Headers): Promise<void>;
   resetPassword?(data: { token: string; newPassword: string }, headers: Headers): Promise<void>;
   signOut?(headers: Headers): Promise<void>;

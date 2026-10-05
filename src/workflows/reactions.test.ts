@@ -338,6 +338,9 @@ async function runTwoStepWorkflow<
       control: async () => {},
       restore: async () => false,
       watch: async () => () => {},
+      timeline: async () => {
+        throw new Error("not used");
+      },
     },
     getProviderSnapshot: async () => {
       throw new Error("not used");

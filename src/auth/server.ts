@@ -39,17 +39,57 @@ import { InstanceAppOnboarding } from "../instance-setup/app-onboarding.js";
 import { TRUSTED_REQUEST_ORIGIN_HEADER } from "../http/request-origin.js";
 import type { InvitationMailer } from "../invitations/index.js";
 import type { AccountMailer } from "./account-emails.js";
+import { oauthProviderAuthServerMetadata } from "@better-auth/oauth-provider";
+import { createDatabase } from "../db/pg.js";
+import {
+  assertRefreshGrantCurrent,
+  canonicalTokenResource,
+  connectorOAuthEndpoints,
+  connectorOAuthPlugins,
+  protectedResourceMetadata,
+  verifyConnectorAccessToken,
+} from "../paseo-connector/oauth.js";
+import { CONNECTOR_PRODUCT_NAME, ConnectorError } from "../paseo-connector/contracts.js";
+import { reportFailure } from "../failures/index.js";
+import {
+  ConnectorFlowError,
+  connectionClientName,
+  decideConnectorConsent,
+  describeConnectorConsent,
+  listConnectorConnections,
+  listConnectorMachines,
+  listMemberDaemons,
+  oauthClientName,
+  revokeConnectorConnection,
+  selectConnectorMachine,
+  type ConnectorFlowContext,
+  type ConnectorOAuthService,
+} from "../paseo-connector/flow.js";
+
+export interface AccountAuthentication {
+  state: "complete" | "verificationRequired";
+  /** The provider's re-signed continuation URL, only when authenticating a connector request. */
+  redirectTo?: string;
+}
 
 export interface AuthServer {
   handle(request: Request): Promise<Response>;
   browserAccount?(request: Request): Promise<Response>;
-  signInEmail?(data: { email: string; password: string }, headers: Headers): Promise<"complete">;
+  signInEmail?(
+    data: { email: string; password: string; oauthQuery?: string | undefined },
+    headers: Headers,
+  ): Promise<AccountAuthentication>;
   signUpEmail?(
-    data: { name: string; email: string; password: string },
+    data: { name: string; email: string; password: string; oauthQuery?: string | undefined },
     headers: Headers,
     invitationId?: string,
-  ): Promise<"complete" | "verificationRequired">;
-  sendVerificationEmail?(email: string, headers: Headers, invitationId?: string): Promise<void>;
+  ): Promise<AccountAuthentication>;
+  sendVerificationEmail?(
+    email: string,
+    headers: Headers,
+    invitationId?: string,
+    oauthQuery?: string,
+  ): Promise<void>;
   requestPasswordReset?(email: string, headers: Headers): Promise<void>;
   resetPassword?(data: { token: string; newPassword: string }, headers: Headers): Promise<void>;
   signOut?(headers: Headers): Promise<void>;
@@ -71,6 +111,11 @@ export interface AuthServer {
   apiKeys?: OrganizationApiKeys;
   cliCredentials?: OrganizationCliCredentials;
   publicCredentials?: PublicCredentialAuthenticator;
+  /**
+   * The Paseo Agent Connector's OAuth surface; absent unless the operator enabled it and the public
+   * origin is HTTPS or loopback.
+   */
+  connector?: ConnectorOAuthService;
   close(): Promise<void>;
 }
 
@@ -95,6 +140,11 @@ export interface AuthServerOptions {
   invitationMailer?: InvitationMailer;
   /** Optional account email delivery. Configured public instances require verification. */
   accountMailer?: AccountMailer;
+  /**
+   * The operator's explicit opt-in to the Paseo Agent Connector (`PASEO_HUB_PASEO_CONNECTOR=enabled`).
+   * Off by default: no OAuth provider, no client registration, no connector routes.
+   */
+  paseoConnector?: boolean;
 }
 
 const sessionSchema = z.object({
@@ -125,6 +175,30 @@ const RAW_PRODUCT_PATHS = new Set([
   "/api/auth/verify-email",
 ]);
 
+/**
+ * The OAuth provider endpoints an OAuth client reaches directly, when the connector is enabled.
+ * Continue and consent stay closed: only the flow-aware connector functions drive them.
+ */
+const CONNECTOR_OAUTH_PATHS = new Map([
+  ["/api/auth/oauth2/authorize", "GET"],
+  ["/api/auth/oauth2/token", "POST"],
+  ["/api/auth/oauth2/register", "POST"],
+  ["/api/auth/oauth2/revoke", "POST"],
+  ["/api/auth/jwks", "GET"],
+]);
+
+const FORM_MEDIA_TYPE = "application/x-www-form-urlencoded";
+
+function tokenRequestError(error: string, description: string, status = 400): Response {
+  return Response.json(
+    { error, error_description: description },
+    { status, headers: { "cache-control": "no-store" } },
+  );
+}
+
+/** Authorization-server metadata members naming an endpoint, checked against what Hub serves. */
+const METADATA_ENDPOINT_MEMBER = /^(?<name>.+)_endpoint$|^jwks_uri$/u;
+
 export function createAuthServer(options: AuthServerOptions): AuthServer {
   const database = options.database.drizzle();
   const policy = options.policy ?? defaultInstanceAuthPolicy();
@@ -149,7 +223,16 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     organization: schema.organizations,
     member: schema.members,
     invitation: schema.invitations,
+    oauthClient: schema.oauthClients,
+    oauthRefreshToken: schema.oauthRefreshTokens,
+    oauthAccessToken: schema.oauthAccessTokens,
+    oauthConsent: schema.oauthConsents,
+    jwks: schema.jwks,
   };
+  const connectorEndpoints =
+    options.paseoConnector === true ? connectorOAuthEndpoints(options.baseURL) : undefined;
+  const connectorDatabase =
+    connectorEndpoints === undefined ? undefined : createDatabase(options.database, options.locks);
   const auth = betterAuth({
     baseURL: options.baseURL,
     secret: options.secret,
@@ -200,7 +283,13 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
         },
       },
     },
-    plugins: [paseoOrganizationPlugin(), tanstackStartCookies()],
+    plugins: [
+      paseoOrganizationPlugin(),
+      ...(connectorEndpoints === undefined || connectorDatabase === undefined
+        ? []
+        : connectorOAuthPlugins(connectorEndpoints, connectorDatabase)),
+      tanstackStartCookies(),
+    ],
   });
   const sessions = {
     async read(headers: Headers): Promise<AccountSession | undefined> {
@@ -238,10 +327,15 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
       : { invitationMailer: options.invitationMailer }),
   });
   const browserOrigin = new URL(options.baseURL).origin;
+  const connector = connectorService();
 
   return {
-    handle(request) {
-      const path = new URL(request.url).pathname;
+    async handle(request) {
+      const url = new URL(request.url);
+      const path = url.pathname;
+      if (connector !== undefined && CONNECTOR_OAUTH_PATHS.has(path)) {
+        return connectorOAuthRequest(request, path);
+      }
       if (path.startsWith("/api/auth/paseo/")) {
         const rejected = rejectCrossOriginCookieMutation(
           request,
@@ -252,13 +346,17 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
       }
       if (path === "/api/auth/sign-up/email") {
         return registration
-          .handleSignUp(request, (admittedRequest) => auth.handler(admittedRequest))
+          .handleSignUp(request, (admittedRequest) => signupAsBrowser(admittedRequest, request))
           .catch((error: unknown) => {
             if (error instanceof RegistrationAdmissionError) {
               return Response.json({ error: "registration_closed" }, { status: 403 });
             }
             throw error;
           });
+      }
+      if (path === "/api/auth/verify-email") {
+        const response = await auth.handler(request);
+        return continueVerifiedSignup(response, request.headers);
       }
       if (path === "/api/auth/change-password") {
         const rejected = rejectCrossOriginCookieMutation(
@@ -286,23 +384,59 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     },
     async signInEmail(data, headers) {
       requireBrowserOrigin(headers, headersBrowserOrigin(headers, browserOrigin));
-      await auth.api.signInEmail({ body: data, headers });
-      return "complete";
+      const { oauthQuery, ...credentials } = data;
+      const body = {
+        ...credentials,
+        ...(oauthQuery === undefined ? {} : { oauth_query: oauthQuery }),
+      };
+      const result = await auth.api.signInEmail({
+        body,
+        headers,
+        // Provider authorization hooks read the browser request, including its headers.
+        request: new Request(new URL("/api/auth/sign-in/email", options.baseURL), {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+        }),
+        asResponse: false,
+      });
+      return authenticationResult(result, oauthQuery, "complete");
     },
     async signUpEmail(data, headers, invitationId) {
       requireBrowserOrigin(headers, headersBrowserOrigin(headers, browserOrigin));
-      await registration.withAdmission(data.email, invitationId, async () => {
-        await auth.api.signUpEmail({
-          body: { ...data, callbackURL: accountCallback(options.baseURL, invitationId) },
+      const { oauthQuery, ...credentials } = data;
+      const body = {
+        ...credentials,
+        callbackURL: signupCallback(oauthQuery, invitationId),
+        ...(oauthQuery === undefined ? {} : { oauth_query: oauthQuery }),
+      };
+      const result = await registration.withAdmission(data.email, invitationId, () =>
+        auth.api.signUpEmail({
+          body,
           headers,
-        });
-      });
-      return accountMailer === undefined ? "complete" : "verificationRequired";
+          request: new Request(new URL("/api/auth/sign-up/email", options.baseURL), {
+            method: "POST",
+            headers,
+            body: JSON.stringify(body),
+          }),
+          asResponse: false,
+          returnHeaders: true,
+        }),
+      );
+      const state = accountMailer === undefined ? "complete" : "verificationRequired";
+      if (oauthQuery === undefined || state === "verificationRequired") return { state };
+      const redirectTo = await continueCreatedAccount(
+        result.response,
+        result.headers,
+        headers,
+        invitationId,
+      );
+      return { state, redirectTo };
     },
-    async sendVerificationEmail(email, headers, invitationId) {
+    async sendVerificationEmail(email, headers, invitationId, oauthQuery) {
       requireBrowserOrigin(headers, headersBrowserOrigin(headers, browserOrigin));
       await auth.api.sendVerificationEmail({
-        body: { email, callbackURL: accountCallback(options.baseURL, invitationId) },
+        body: { email, callbackURL: signupCallback(oauthQuery, invitationId) },
         headers,
       });
     },
@@ -368,8 +502,341 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     apiKeys,
     cliCredentials,
     publicCredentials,
+    ...(connector === undefined ? {} : { connector }),
     close: () => Promise.resolve(),
   };
+
+  function connectorService(): ConnectorOAuthService | undefined {
+    if (connectorEndpoints === undefined || connectorDatabase === undefined) return undefined;
+    const endpoints = connectorEndpoints;
+    const store = connectorDatabase;
+    const libraryMetadata = oauthProviderAuthServerMetadata(auth);
+    // Advertise only endpoints Hub actually serves: the library also lists introspection (and,
+    // with openid, userinfo and end-session), which stay closed.
+    const authorizationServerMetadata = async (request: Request): Promise<Response> => {
+      const response = await libraryMetadata(request);
+      if (!response.ok) return response;
+      const metadata = z.record(z.string(), z.unknown()).parse(await response.json());
+      for (const [member, value] of Object.entries(metadata)) {
+        const match = METADATA_ENDPOINT_MEMBER.exec(member);
+        if (match === null || typeof value !== "string") continue;
+        if (CONNECTOR_OAUTH_PATHS.has(new URL(value).pathname)) continue;
+        delete metadata[member];
+        const name = match.groups?.["name"];
+        if (name !== undefined) delete metadata[`${name}_endpoint_auth_methods_supported`];
+      }
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      return new Response(JSON.stringify(metadata), { status: response.status, headers });
+    };
+    const flow = async (headers: Headers): Promise<ConnectorFlowContext> => {
+      const session = await sessions.read(headers);
+      if (session === undefined) throw new ConnectorFlowError("unauthenticated");
+      if (session.mustChangePassword) throw new ConnectorFlowError("password_change_required");
+      return {
+        database: store,
+        account: { userId: session.userId, sessionId: session.sessionId },
+        listMemberDaemons: (userId) => listMemberDaemons(options.database, userId),
+        authorize: (path, body) => authorizeAsBrowser(path, body, headers),
+        oauthClientName: (clientId) => oauthClientName(options.database, clientId),
+        connectionClientName: (userId, connectionId) =>
+          connectionClientName(options.database, userId, connectionId),
+        now: () => new Date(),
+      };
+    };
+    const mutation = async (headers: Headers): Promise<ConnectorFlowContext> => {
+      requireBrowserOrigin(headers, headersBrowserOrigin(headers, browserOrigin));
+      return flow(headers);
+    };
+    return {
+      endpoints,
+      authorizationServerMetadata,
+      protectedResourceMetadata: () => Response.json(protectedResourceMetadata(endpoints)),
+      verifyAccessToken: (token) =>
+        verifyConnectorAccessToken(token, endpoints, () => auth.api.getJwks()),
+      listMachines: async (headers) => listConnectorMachines(await flow(headers)),
+      selectMachine: async (input, headers) =>
+        selectConnectorMachine(await mutation(headers), input),
+      decideConsent: async (input, headers) =>
+        decideConnectorConsent(await mutation(headers), input),
+      describeConsent: async (input, headers) =>
+        describeConnectorConsent(await flow(headers), input),
+      listConnections: async (headers) => listConnectorConnections(await flow(headers)),
+      revokeConnection: async (input, headers) =>
+        revokeConnectorConnection(await mutation(headers), input),
+    };
+  }
+
+  function authenticationResult(
+    result: unknown,
+    oauthQuery: string | undefined,
+    state: AccountAuthentication["state"],
+  ): AccountAuthentication {
+    if (oauthQuery === undefined) return { state };
+    return { state, redirectTo: authenticationRedirect(result) };
+  }
+
+  /** Accept only the provider's signed Hub continuation, never a client-controlled redirect. */
+  function authenticationRedirect(result: unknown): string {
+    const parsed = z.object({ url: z.string() }).safeParse(result);
+    if (!parsed.success) throw new ConnectorFlowError("authorization_failed");
+    const url = new URL(parsed.data.url, browserOrigin);
+    if (
+      url.origin !== browserOrigin ||
+      url.pathname !== "/oauth/connect" ||
+      !url.searchParams.has("sig")
+    ) {
+      throw new ConnectorFlowError("authorization_failed");
+    }
+    return `${url.pathname}${url.search}`;
+  }
+
+  /** Invitation context is a browser fragment, never an edit to the provider's signed query. */
+  function connectorInvitationRedirect(redirectTo: string, invitationId?: string): string {
+    if (invitationId === undefined) return redirectTo;
+    const url = new URL(redirectTo, browserOrigin);
+    url.hash = new URLSearchParams({ invitation: invitationId }).toString();
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+
+  function signupCallback(oauthQuery: string | undefined, invitationId?: string): string {
+    if (connector === undefined || oauthQuery === undefined) {
+      return accountCallback(options.baseURL, invitationId);
+    }
+    const query = oauthQuery.startsWith("?") ? oauthQuery : `?${oauthQuery}`;
+    return new URL(
+      connectorInvitationRedirect(`/oauth/connect${query}`, invitationId),
+      browserOrigin,
+    ).href;
+  }
+
+  /** Continue with the session the authentication endpoint just issued, not the previous account. */
+  function authenticatedHeaders(responseHeaders: Headers, browserHeaders: Headers): Headers {
+    const headers = new Headers(browserHeaders);
+    headers.set(
+      "cookie",
+      responseHeaders
+        .getSetCookie()
+        .map((value) => value.split(";", 1)[0])
+        .join("; "),
+    );
+    return headers;
+  }
+
+  async function continueCreatedAccount(
+    result: unknown,
+    responseHeaders: Headers,
+    browserHeaders: Headers,
+    invitationId?: string,
+  ): Promise<string> {
+    const next = authenticationRedirect(result);
+    const url = new URL(next, browserOrigin);
+    const redirectTo = await authorizeAsBrowser(
+      "continue",
+      { created: true, oauth_query: url.search },
+      authenticatedHeaders(responseHeaders, browserHeaders),
+    );
+    return connectorInvitationRedirect(authenticationRedirect({ url: redirectTo }), invitationId);
+  }
+
+  async function signupAsBrowser(request: Request, originalRequest: Request): Promise<Response> {
+    const body = z.record(z.string(), z.unknown()).parse(await request.clone().json());
+    const oauthQuery = typeof body["oauth_query"] === "string" ? body["oauth_query"] : undefined;
+    if (connector === undefined || oauthQuery === undefined) return auth.handler(request);
+    const originalBody = z
+      .record(z.string(), z.unknown())
+      .parse(await originalRequest.clone().json());
+    const invitationId =
+      new URL(request.url).searchParams.get("invitation") ??
+      (typeof originalBody["invitation"] === "string" ? originalBody["invitation"] : undefined);
+    const response = await auth.handler(
+      new Request(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify({ ...body, callbackURL: signupCallback(oauthQuery, invitationId) }),
+      }),
+    );
+    if (!response.ok || accountMailer !== undefined) return response;
+    const redirectTo = await continueCreatedAccount(
+      await response.clone().json(),
+      response.headers,
+      request.headers,
+      invitationId,
+    );
+    const headers = new Headers(response.headers);
+    headers.delete("content-length");
+    return Response.json({ url: redirectTo, redirect: true }, { headers });
+  }
+
+  async function continueVerifiedSignup(
+    response: Response,
+    browserHeaders: Headers,
+  ): Promise<Response> {
+    if (connector === undefined || response.status !== 302) return response;
+    const location = response.headers.get("location");
+    if (location === null) return response;
+    const callback = new URL(location, browserOrigin);
+    if (
+      callback.origin !== browserOrigin ||
+      callback.pathname !== "/oauth/connect" ||
+      !callback.searchParams.has("sig") ||
+      !(callback.searchParams.get("prompt") ?? "").split(" ").includes("create")
+    )
+      return response;
+    const headers = authenticatedHeaders(response.headers, browserHeaders);
+    const session = await sessions.read(headers);
+    if (session === undefined || session.mustChangePassword) return response;
+    const user = await options.database.query<{ created_at: Date }>(
+      'select created_at from "user" where id = $1',
+      [session.userId],
+    );
+    const issuedAt = Number(callback.searchParams.get("ba_iat"));
+    // Verification of an older account is not creation for this authorization request.
+    if (
+      !Number.isFinite(issuedAt) ||
+      issuedAt <= 0 ||
+      user.rows[0] === undefined ||
+      new Date(user.rows[0].created_at).getTime() < issuedAt
+    )
+      return response;
+    const next = await authorizeAsBrowser(
+      "continue",
+      { created: true, oauth_query: callback.search },
+      headers,
+    );
+    const continued = new Headers(response.headers);
+    const invitationId = new URLSearchParams(callback.hash.slice(1)).get("invitation") ?? undefined;
+    continued.set(
+      "location",
+      connectorInvitationRedirect(authenticationRedirect({ url: next }), invitationId),
+    );
+    return new Response(response.body, { status: response.status, headers: continued });
+  }
+
+  /** Drives the library's continue/consent endpoint as the signed-in browser, cookie and all. */
+  async function authorizeAsBrowser(
+    path: "continue" | "consent",
+    body: Record<string, unknown>,
+    browserHeaders: Headers,
+  ): Promise<string> {
+    const response = await auth.handler(
+      new Request(new URL(`/api/auth/oauth2/${path}`, options.baseURL), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+          origin: browserOrigin,
+          cookie: browserHeaders.get("cookie") ?? "",
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+    const result = z
+      .object({ url: z.string().min(1), error: z.string().optional() })
+      .partial()
+      .safeParse(await response.json().catch(() => undefined));
+    if (!response.ok || !result.success || result.data.url === undefined) {
+      const reason = result.success ? (result.data.error ?? "") : "";
+      throw new ConnectorFlowError(
+        "authorization_failed",
+        `oauth2/${path} returned HTTP ${response.status} ${reason}`.trim(),
+      );
+    }
+    return result.data.url;
+  }
+
+  async function connectorOAuthRequest(request: Request, path: string): Promise<Response> {
+    if (request.method !== CONNECTOR_OAUTH_PATHS.get(path)) {
+      return Response.json({ error: "not_found" }, { status: 404 });
+    }
+    if (request.method === "GET") return auth.handler(request);
+    // Token, registration and revocation are OAuth client calls. Whatever cookie a browser
+    // attaches, they are never cookie-authenticated.
+    const headers = new Headers(request.headers);
+    headers.delete("cookie");
+    if (path === "/api/auth/oauth2/token") {
+      return connectorTokenRequest(request, headers);
+    }
+    const response = await auth.handler(
+      new Request(request.url, { method: "POST", headers, body: await request.text() }),
+    );
+    if (path !== "/api/auth/oauth2/register" || response.status !== 200) return response;
+    // RFC 7591 §3.2.1: a registered client is 201 Created and never cached. The pinned library
+    // answers 200 and drops its own no-store header.
+    const registered = new Headers(response.headers);
+    registered.set("cache-control", "no-store");
+    registered.set("pragma", "no-cache");
+    return new Response(response.body, { status: 201, headers: registered });
+  }
+
+  /**
+   * Admits a token request only as a plain form naming the connector as its one resource (or, for
+   * a code or refresh grant, naming none: Hub applies its only resource), and hands the library
+   * that form re-encoded with the canonical resource, so Hub and the library read the same fields.
+   * The library never sees a request without the resource, which would mint an opaque token
+   * outside the connector's claim checks; every token Hub issues is a connector JWT for exactly
+   * this resource.
+   */
+  async function connectorTokenRequest(request: Request, headers: Headers): Promise<Response> {
+    const mediaType = (request.headers.get("content-type") ?? "").split(";", 1)[0]!.trim();
+    if (mediaType.toLowerCase() !== FORM_MEDIA_TYPE) {
+      return tokenRequestError("invalid_request", "the token request must be a form");
+    }
+    const form = new URLSearchParams(await request.text());
+    const resource =
+      connectorEndpoints === undefined
+        ? undefined
+        : canonicalTokenResource(
+            connectorEndpoints,
+            form.get("grant_type"),
+            form.getAll("resource"),
+          );
+    if (resource === undefined) {
+      return tokenRequestError(
+        "invalid_target",
+        `resource must be the ${CONNECTOR_PRODUCT_NAME} MCP endpoint`,
+      );
+    }
+    form.set("resource", resource);
+    if (form.get("grant_type") === "refresh_token") {
+      const refused = await refreshGrantRefusal(form.get("refresh_token"));
+      if (refused !== undefined) return refused;
+    }
+    headers.set("content-type", FORM_MEDIA_TYPE);
+    headers.delete("content-length");
+    return auth.handler(
+      new Request(request.url, { method: "POST", headers, body: form.toString() }),
+    );
+  }
+
+  /**
+   * Refuses a refresh whose connection grant is no longer current before the library rotates the
+   * presented refresh token, so a refusal (or Hub's own outage) never spends it. A dead grant is
+   * invalid_grant; failing to read the grant is 503, never invalid_grant.
+   */
+  async function refreshGrantRefusal(presented: string | null): Promise<Response | undefined> {
+    if (presented === null || presented === "" || connectorDatabase === undefined) return undefined;
+    try {
+      await assertRefreshGrantCurrent(options.database, connectorDatabase, presented, new Date());
+      return undefined;
+    } catch (error) {
+      if (error instanceof ConnectorError) {
+        return tokenRequestError(
+          "invalid_grant",
+          "the connector connection is no longer authorized",
+        );
+      }
+      reportFailure(error, {
+        operation: "paseo_connector.token.refresh_grant",
+        component: "paseo_connector",
+      });
+      return tokenRequestError(
+        "temporarily_unavailable",
+        "the authorization server could not check this grant; retry later",
+        503,
+      );
+    }
+  }
 
   async function changePassword(request: Request): Promise<Response> {
     const session = await sessions.read(request.headers);

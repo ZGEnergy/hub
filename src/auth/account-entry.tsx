@@ -11,7 +11,7 @@ import { TwoLine } from "../components/app/two-line.js";
 import { Button } from "../components/ui/button.js";
 import { Input } from "../components/ui/input.js";
 import { formValue } from "./account-actions.js";
-import { ErrorSummary } from "./account-states.js";
+import { ErrorSummary, FailedEntry } from "./account-states.js";
 import { FormField } from "../components/app/form-field.js";
 import {
   acceptInvitation,
@@ -26,24 +26,78 @@ import type { AccountState } from "./organization-contract.js";
 import type { Result } from "../contract/respond.js";
 import { ACCOUNT_MUTATION_KEY, useAccountMutationError } from "./account-mutation.js";
 import { ForgotPasswordEntry, VerificationPendingEntry } from "./account-recovery.js";
+import type { AccountAuthentication } from "./server.js";
 
 type EmptyResult = Result<Record<string, never>>;
-type AuthenticationResult = Result<{ state: "complete" | "verificationRequired" }>;
+type AuthenticationResult = Result<AccountAuthentication>;
 type AccountCommandResult = Result<{
   state: "sessionExpired" | "organizationRequired" | "complete";
 }>;
 
 type OrganizationAccount = Extract<AccountState, { status: "organizationRequired" | "active" }>;
 
+export interface ConnectorAuthenticationRequest {
+  query: string;
+  prompt: "create" | "login" | undefined;
+}
+
+/** Preserve the provider's query verbatim; router search parsing loses repeated signed fields. */
+export function readConnectorAuthenticationRequest(): ConnectorAuthenticationRequest | undefined {
+  if (typeof window === "undefined" || window.location.pathname !== "/oauth/connect")
+    return undefined;
+  const query = window.location.search;
+  const params = new URLSearchParams(query);
+  if (!params.has("sig") || !params.has("client_id")) return undefined;
+  const prompts = (params.get("prompt") ?? "").split(" ");
+  let prompt: "create" | "login" | undefined;
+  if (prompts.includes("create")) prompt = "create";
+  else if (prompts.includes("login")) prompt = "login";
+  return { query, prompt };
+}
+
+function followAuthenticationRedirect(redirectTo: string, invitationId?: string) {
+  if (invitationId !== undefined) {
+    const url = new URL(redirectTo, window.location.origin);
+    url.hash = new URLSearchParams({ invitation: invitationId }).toString();
+    window.location.assign(url.href);
+    return;
+  }
+  window.location.assign(redirectTo);
+}
+
 /**
  * Sign in and sign up are the same decision seen from two sides, so only one is on
  * screen at a time. Stacking both forms made the card taller than the viewport.
  */
 export function AccountEntry({ account }: { account: AccountState & { status: "signedOut" } }) {
+  const [oauthRequest] = useState(readConnectorAuthenticationRequest);
+  if (
+    oauthRequest?.prompt === "create" &&
+    account.registration !== "open" &&
+    account.invitation === undefined
+  ) {
+    return (
+      <FailedEntry message="This Hub is not accepting account creation without an invitation. Restart the connection from your client using an existing account." />
+    );
+  }
+  return <AccountAuthenticationEntry account={account} oauthRequest={oauthRequest} />;
+}
+
+function AccountAuthenticationEntry({
+  account,
+  oauthRequest,
+}: {
+  account: AccountState & { status: "signedOut" };
+  oauthRequest: ConnectorAuthenticationRequest | undefined;
+}) {
   const invitationContext = account.invitation !== undefined;
   const invitationId = account.invitation?.id;
   const invitationSignInRequested = readInvitationSignInRequest();
-  const [mode, setMode] = useState<"signIn" | "signUp">(invitationContext ? "signUp" : "signIn");
+  const [mode, setMode] = useState<"signIn" | "signUp">(
+    invitationContext || (oauthRequest?.prompt === "create" && account.registration === "open")
+      ? "signUp"
+      : "signIn",
+  );
   const [forgotPassword, setForgotPassword] = useState(false);
   const [verificationEmail, setVerificationEmail] = useState<string>();
   useEffect(() => {
@@ -63,6 +117,10 @@ export function AccountEntry({ account }: { account: AccountState & { status: "s
         setVerificationEmail(input.data.email);
         return;
       }
+      if (result.data.redirectTo !== undefined) {
+        followAuthenticationRedirect(result.data.redirectTo, invitationId);
+        return;
+      }
       await queryClient.invalidateQueries({ queryKey: ["account"] });
     },
   });
@@ -74,6 +132,10 @@ export function AccountEntry({ account }: { account: AccountState & { status: "s
       if (result.status !== "ok") return;
       if (result.data.state === "verificationRequired") {
         setVerificationEmail(input.data.email);
+        return;
+      }
+      if (result.data.redirectTo !== undefined) {
+        followAuthenticationRedirect(result.data.redirectTo, invitationId);
         return;
       }
       await queryClient.invalidateQueries({ queryKey: ["account"] });
@@ -96,7 +158,13 @@ export function AccountEntry({ account }: { account: AccountState & { status: "s
       const email = formValue(data, "email");
       const password = formValue(data, "password");
       if (mode === "signIn") {
-        signInMutation.mutate({ data: { email, password } });
+        signInMutation.mutate({
+          data: {
+            email,
+            password,
+            ...(oauthRequest === undefined ? {} : { oauthQuery: oauthRequest.query }),
+          },
+        });
       } else {
         signUpMutation.mutate({
           data: {
@@ -104,11 +172,12 @@ export function AccountEntry({ account }: { account: AccountState & { status: "s
             email,
             password,
             ...(account.invitation === undefined ? {} : { invitation: account.invitation.id }),
+            ...(oauthRequest === undefined ? {} : { oauthQuery: oauthRequest.query }),
           },
         });
       }
     },
-    [account.invitation, mode, signInMutation, signUpMutation],
+    [account.invitation, mode, oauthRequest, signInMutation, signUpMutation],
   );
   const mutation = mode === "signIn" ? signInMutation : signUpMutation;
   const message =
@@ -127,7 +196,8 @@ export function AccountEntry({ account }: { account: AccountState & { status: "s
     return (
       <VerificationPendingEntry
         email={verificationEmail}
-        {...(account.invitation?.id === undefined ? {} : { invitation: account.invitation.id })}
+        {...(invitationId === undefined ? {} : { invitation: invitationId })}
+        {...(oauthRequest === undefined ? {} : { oauthQuery: oauthRequest.query })}
         onBack={showSignIn}
       />
     );
@@ -452,7 +522,11 @@ function useAccountCommandResult(
       if (result.status !== "ok") return;
       if (result.data.state === "sessionExpired") {
         const url = new URL(window.location.href);
-        if (url.searchParams.has("invitation")) {
+        if (
+          url.searchParams.has("invitation") ||
+          (readConnectorAuthenticationRequest() !== undefined &&
+            new URLSearchParams(url.hash.slice(1)).has("invitation"))
+        ) {
           window.history.replaceState(
             Object.assign({}, window.history.state, { paseoInvitationMode: "sign-in" }),
             "",
@@ -461,7 +535,16 @@ function useAccountCommandResult(
         }
       }
       if (clearInvitation && result.data.state === "complete") {
-        window.history.replaceState({}, "", "/");
+        if (
+          readConnectorAuthenticationRequest() !== undefined &&
+          new URLSearchParams(window.location.hash.slice(1)).has("invitation")
+        ) {
+          const url = new URL(window.location.href);
+          url.hash = "";
+          window.history.replaceState({}, "", url);
+        } else {
+          window.history.replaceState({}, "", "/");
+        }
       }
       await queryClient.invalidateQueries({ queryKey: ["account"] });
     },

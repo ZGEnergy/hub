@@ -11,17 +11,24 @@ export function TwoLine({
   primary,
   secondary,
   mono = false,
+  wrap = false,
 }: {
   primary: ReactNode;
   secondary?: ReactNode;
   /** The secondary line is an identifier — a key prefix, a slug, an id — not prose. */
   mono?: boolean;
+  /**
+   * Both lines wrap instead of truncating. For a record the reader must read in full before
+   * deciding, such as a permission being granted; never inside a table row.
+   */
+  wrap?: boolean;
 }) {
+  const fit = wrap ? "break-words" : "truncate";
   return (
     <span className="grid min-w-0 gap-0.5">
-      <span className="truncate text-sm">{primary}</span>
+      <span className={cn(fit, "text-sm")}>{primary}</span>
       {secondary === undefined ? null : (
-        <span className={cn("truncate text-xs text-muted-foreground", mono && "font-mono")}>
+        <span className={cn(fit, "text-xs text-muted-foreground", mono && "font-mono")}>
           {secondary}
         </span>
       )}

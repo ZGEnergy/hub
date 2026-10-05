@@ -34,6 +34,9 @@ class TestAgents implements AgentConnection {
   async watch() {
     return () => {};
   }
+  async timeline(): Promise<never> {
+    throw new Error("not supported");
+  }
   async restore(workspaceId: string) {
     this.restorations++;
     for (const [id, agent] of this.agents)

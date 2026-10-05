@@ -1776,6 +1776,7 @@ export class HubHarness {
       operatorConsole: null,
       providerApplications: null,
       testTriggerRoutes: true,
+      paseoConnector: { status: "disabled" },
       auth: () => Promise.resolve(new Response("Not Found", { status: 404 })),
       organizationResources: () => Promise.reject(new Error("organization resources unavailable")),
       connectionStatus: () =>

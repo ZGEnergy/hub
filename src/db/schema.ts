@@ -13,12 +13,14 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 import type { LaunchMachineIntent } from "../dispatcher/launch-machine-intent.js";
 import { INVITATION_ROLES, ORGANIZATION_ROLES } from "../auth/organization-contract.js";
 import { API_KEY_SCOPES } from "../auth/api-key-contract.js";
+import type { ConnectorScope } from "../paseo-connector/contracts.js";
 
 export { INVITATION_ROLES, ORGANIZATION_ROLES };
 
@@ -1455,3 +1457,295 @@ export const executionCredentialLeases = pgTable(
   },
   (table) => [index("execution_credential_leases_execution_idx").on(table.executionId)],
 );
+
+export const connectorConnections = pgTable(
+  "connector_connections",
+  {
+    id: uuid().primaryKey(),
+    ownerUserId: text("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    daemonId: uuid("daemon_id").notNull(),
+    workingDirectory: text("working_directory").notNull(),
+    scopes: text().array().$type<readonly ConnectorScope[]>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  },
+  (table) => [
+    // Targets of the composite foreign keys that force child rows to carry their connection's identity.
+    // Constraints, not indexes: the generated migration creates them with the table, before any foreign key.
+    unique("connector_connections_identity_unique").on(
+      table.id,
+      table.ownerUserId,
+      table.organizationId,
+      table.daemonId,
+    ),
+    unique("connector_connections_id_owner_unique").on(table.id, table.ownerUserId),
+    index("connector_connections_owner_created_idx").on(table.ownerUserId, table.createdAt.desc()),
+    index("connector_connections_daemon_idx").on(table.daemonId, table.organizationId),
+    foreignKey({
+      columns: [table.daemonId, table.organizationId],
+      foreignColumns: [daemons.id, daemons.organizationId],
+      name: "connector_connections_daemon_organization_fk",
+    }).onDelete("cascade"),
+    check(
+      "connector_connections_scopes_check",
+      sql`${table.scopes} <@ ARRAY['paseo:read', 'paseo:run', 'paseo:cancel']::text[] and cardinality(${table.scopes}) > 0`,
+    ),
+  ],
+);
+
+export const connectorConsentFlows = pgTable(
+  "connector_consent_flows",
+  {
+    id: uuid().primaryKey(),
+    sessionId: text("session_id").notNull(),
+    ownerUserId: text("owner_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    authorizationFingerprint: text("authorization_fingerprint").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("connector_consent_flows_owner_session_idx").on(table.ownerUserId, table.sessionId),
+    index("connector_consent_flows_connection_idx").on(table.connectionId),
+    foreignKey({
+      columns: [table.connectionId, table.ownerUserId],
+      foreignColumns: [connectorConnections.id, connectorConnections.ownerUserId],
+      name: "connector_consent_flows_connection_owner_fk",
+    }).onDelete("cascade"),
+  ],
+);
+
+export const connectorOperations = pgTable(
+  "connector_operations",
+  {
+    id: uuid().primaryKey(),
+    connectionId: uuid("connection_id").notNull(),
+    ownerUserId: text("owner_user_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    daemonId: uuid("daemon_id").notNull(),
+    kind: text().$type<"launch" | "message">().notNull(),
+    requestKey: text("request_key").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    creationKey: text("creation_key"),
+    messageId: text("message_id").notNull(),
+    agentId: text("agent_id"),
+    workspaceId: text("workspace_id"),
+    state: text()
+      .$type<"creating" | "created" | "accepted" | "failed" | "outcome_unknown">()
+      .notNull(),
+    errorCode: text("error_code"),
+  },
+  (table) => [
+    uniqueIndex("connector_operations_connection_request_key_unique").on(
+      table.connectionId,
+      table.requestKey,
+    ),
+    unique("connector_operations_identity_unique").on(
+      table.id,
+      table.connectionId,
+      table.ownerUserId,
+      table.organizationId,
+      table.daemonId,
+    ),
+    foreignKey({
+      columns: [table.connectionId, table.ownerUserId, table.organizationId, table.daemonId],
+      foreignColumns: [
+        connectorConnections.id,
+        connectorConnections.ownerUserId,
+        connectorConnections.organizationId,
+        connectorConnections.daemonId,
+      ],
+      name: "connector_operations_connection_identity_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.daemonId, table.organizationId],
+      foreignColumns: [daemons.id, daemons.organizationId],
+      name: "connector_operations_daemon_organization_fk",
+    }).onDelete("cascade"),
+    check("connector_operations_kind_check", sql`${table.kind} in ('launch', 'message')`),
+    check(
+      "connector_operations_state_check",
+      sql`${table.state} in ('creating', 'created', 'accepted', 'failed', 'outcome_unknown')`,
+    ),
+  ],
+);
+
+export const connectorAgents = pgTable(
+  "connector_agents",
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    connectionId: uuid("connection_id").notNull(),
+    ownerUserId: text("owner_user_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    daemonId: uuid("daemon_id").notNull(),
+    agentId: text("agent_id").notNull(),
+    workspaceId: text("workspace_id").notNull(),
+    launchOperationId: uuid("launch_operation_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    // A daemon agent has exactly one owner: a second connection cannot claim it.
+    uniqueIndex("connector_agents_daemon_agent_unique").on(table.daemonId, table.agentId),
+    uniqueIndex("connector_agents_launch_operation_unique").on(table.launchOperationId),
+    index("connector_agents_connection_idx").on(table.connectionId, table.createdAt),
+    foreignKey({
+      columns: [table.connectionId, table.ownerUserId, table.organizationId, table.daemonId],
+      foreignColumns: [
+        connectorConnections.id,
+        connectorConnections.ownerUserId,
+        connectorConnections.organizationId,
+        connectorConnections.daemonId,
+      ],
+      name: "connector_agents_connection_identity_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [
+        table.launchOperationId,
+        table.connectionId,
+        table.ownerUserId,
+        table.organizationId,
+        table.daemonId,
+      ],
+      foreignColumns: [
+        connectorOperations.id,
+        connectorOperations.connectionId,
+        connectorOperations.ownerUserId,
+        connectorOperations.organizationId,
+        connectorOperations.daemonId,
+      ],
+      name: "connector_agents_operation_identity_fk",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.daemonId, table.organizationId],
+      foreignColumns: [daemons.id, daemons.organizationId],
+      name: "connector_agents_daemon_organization_fk",
+    }).onDelete("cascade"),
+  ],
+);
+
+/*
+ * Better Auth OAuth-provider (@better-auth/oauth-provider 1.6.23) and JWT plugin models, mapped
+ * field for field from the installed packages' plugin schemas. Better Auth generates the text ids;
+ * unspecified fields are required and unspecified reference deletes cascade, as Better Auth defaults.
+ */
+export const oauthClients = pgTable(
+  "oauth_client",
+  {
+    id: text().primaryKey(),
+    clientId: text("client_id").notNull().unique(),
+    clientSecret: text("client_secret"),
+    disabled: boolean().default(false),
+    skipConsent: boolean("skip_consent"),
+    enableEndSession: boolean("enable_end_session"),
+    subjectType: text("subject_type"),
+    scopes: text().array(),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }),
+    name: text(),
+    uri: text(),
+    icon: text(),
+    contacts: text().array(),
+    tos: text(),
+    policy: text(),
+    softwareId: text("software_id"),
+    softwareVersion: text("software_version"),
+    softwareStatement: text("software_statement"),
+    redirectUris: text("redirect_uris").array().notNull(),
+    postLogoutRedirectUris: text("post_logout_redirect_uris").array(),
+    tokenEndpointAuthMethod: text("token_endpoint_auth_method"),
+    grantTypes: text("grant_types").array(),
+    responseTypes: text("response_types").array(),
+    public: boolean(),
+    type: text(),
+    requirePKCE: boolean("require_pkce"),
+    referenceId: text("reference_id"),
+    metadata: jsonb(),
+  },
+  (table) => [index("oauth_client_user_id_idx").on(table.userId)],
+);
+
+export const oauthRefreshTokens = pgTable(
+  "oauth_refresh_token",
+  {
+    id: text().primaryKey(),
+    token: text().notNull().unique(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    sessionId: text("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    referenceId: text("reference_id"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    revoked: timestamp({ withTimezone: true }),
+    authTime: timestamp("auth_time", { withTimezone: true }),
+    scopes: text().array().notNull(),
+  },
+  (table) => [
+    index("oauth_refresh_token_client_id_idx").on(table.clientId),
+    index("oauth_refresh_token_session_id_idx").on(table.sessionId),
+    index("oauth_refresh_token_user_id_idx").on(table.userId),
+  ],
+);
+
+export const oauthAccessTokens = pgTable(
+  "oauth_access_token",
+  {
+    id: text().primaryKey(),
+    token: text().notNull().unique(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    sessionId: text("session_id").references(() => sessions.id, { onDelete: "set null" }),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    referenceId: text("reference_id"),
+    refreshId: text("refresh_id").references(() => oauthRefreshTokens.id, { onDelete: "cascade" }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    scopes: text().array().notNull(),
+  },
+  (table) => [
+    index("oauth_access_token_client_id_idx").on(table.clientId),
+    index("oauth_access_token_session_id_idx").on(table.sessionId),
+    index("oauth_access_token_user_id_idx").on(table.userId),
+    index("oauth_access_token_refresh_id_idx").on(table.refreshId),
+  ],
+);
+
+export const oauthConsents = pgTable(
+  "oauth_consent",
+  {
+    id: text().primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    userId: text("user_id").references(() => users.id, { onDelete: "cascade" }),
+    referenceId: text("reference_id"),
+    scopes: text().array().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index("oauth_consent_client_id_idx").on(table.clientId),
+    index("oauth_consent_user_id_idx").on(table.userId),
+  ],
+);
+
+export const jwks = pgTable("jwks", {
+  id: text().primaryKey(),
+  publicKey: text("public_key").notNull(),
+  privateKey: text("private_key").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+});

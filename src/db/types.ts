@@ -1180,6 +1180,7 @@ export interface TerminateMachineFields {
 }
 
 export interface Database {
+  readonly connector: import("../paseo-connector/contracts.js").ConnectorStore;
   readonly executionAuthority: import("../execution-authority/index.js").ExecutionAuthorityStore;
   readonly schedules: import("../triggers/schedule/index.js").ScheduleStore;
   findAgentSessionByKey(
@@ -1602,7 +1603,8 @@ export interface Database {
     organizationId: string,
     since: Date,
   ): Promise<UnroutedProviderEventCount[]>;
-  isOrganizationMember(userId: string, organizationId: string): Promise<boolean>;
+  /** The user's stored role in the organization, or undefined when they are not a member. */
+  organizationMemberRole(userId: string, organizationId: string): Promise<string | undefined>;
   startConnectionAttempt(input: StartConnectionAttemptInput): Promise<void>;
   findConnectionAttemptConfiguration(
     stateVerifier: string,

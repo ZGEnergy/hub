@@ -344,6 +344,20 @@
       "when": 1788991675061,
       "tag": "0048_execution_authority",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1790822954369,
+      "tag": "0049_bright_thundra",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1790824228662,
+      "tag": "0050_next_the_initiative",
+      "breakpoints": true
     }
   ]
 }
