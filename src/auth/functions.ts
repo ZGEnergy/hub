@@ -13,12 +13,14 @@ import {
 import { PASSWORD_MIN_LENGTH } from "./instance-policy.js";
 import { API_KEY_SCOPES, apiKeyScopeSchema } from "./api-key-contract.js";
 import { parseEntitlementDenial, type EntitlementDenialPayload } from "../entitlements/denial.js";
+import type { AccountAuthentication } from "./server.js";
 
 const credentialsSchema = z.object({
   email: z.string().email(),
   password: z.string().min(PASSWORD_MIN_LENGTH),
 });
-const signUpSchema = credentialsSchema.extend({
+const authenticationSchema = credentialsSchema.extend({ oauthQuery: z.string().min(1).optional() });
+const signUpSchema = authenticationSchema.extend({
   name: z.string().trim().min(1),
   invitation: z.string().min(1).optional(),
 });
@@ -30,7 +32,10 @@ const resetPasswordSchema = z.object({
   token: z.string().min(1),
   newPassword: z.string().min(PASSWORD_MIN_LENGTH),
 });
-const accountEntrySchema = z.object({ invitation: z.string().optional() });
+const accountEntrySchema = z.object({
+  invitation: z.string().optional(),
+  authenticationView: z.literal(true).optional(),
+});
 const initialOperatorSchema = credentialsSchema.strip();
 const createOrganizationSchema = z.object({ name: z.string().trim().min(1).max(100) });
 const selectOrganizationSchema = z.object({ organizationId: z.string().min(1) });
@@ -72,12 +77,15 @@ export const accountState = createServerFn({ method: "GET" })
   .validator(accountEntrySchema)
   .handler(async ({ data }): Promise<Result<z.infer<typeof accountStateSchema>>> => {
     const request = getRequest();
+    const headers = new Headers(request.headers);
+    // Reauthentication needs the public registration/invitation policy, not another user's view.
+    if (data.authenticationView === true) headers.delete("cookie");
     const url = new URL("/api/auth/paseo/state", request.url);
     if (data.invitation !== undefined) url.searchParams.set("invitation", data.invitation);
     try {
       const response = await (
         await getApplication()
-      ).browserAccount?.(new Request(url, { headers: request.headers }));
+      ).browserAccount?.(new Request(url, { headers }));
       if (response === undefined) {
         return respondWithFailure(
           new Error("browser account capability unavailable"),
@@ -101,13 +109,13 @@ export const accountState = createServerFn({ method: "GET" })
   });
 
 export const signIn = createServerFn({ method: "POST" })
-  .validator(credentialsSchema)
-  .handler(async ({ data }): Promise<Result<{ state: "complete" | "verificationRequired" }>> => {
+  .validator(authenticationSchema)
+  .handler(async ({ data }): Promise<Result<AccountAuthentication>> => {
     try {
       const application = await getApplication();
       if (application.signInEmail === undefined) throw new Error("auth unavailable");
-      await application.signInEmail(data, getRequest().headers);
-      return respondOk({ state: "complete" });
+      const result = await application.signInEmail(data, getRequest().headers);
+      return respondOk(result);
     } catch (error) {
       if (isAPIError(error) && error.body?.code === "EMAIL_NOT_VERIFIED") {
         return respondOk({ state: "verificationRequired" });
@@ -129,16 +137,21 @@ export const signIn = createServerFn({ method: "POST" })
 
 export const signUp = createServerFn({ method: "POST" })
   .validator(signUpSchema)
-  .handler(async ({ data }): Promise<Result<{ state: "complete" | "verificationRequired" }>> => {
+  .handler(async ({ data }): Promise<Result<AccountAuthentication>> => {
     try {
       const application = await getApplication();
       if (application.signUpEmail === undefined) throw new Error("auth unavailable");
-      const state = await application.signUpEmail(
-        { name: data.name, email: data.email, password: data.password },
+      const result = await application.signUpEmail(
+        {
+          name: data.name,
+          email: data.email,
+          password: data.password,
+          ...(data.oauthQuery === undefined ? {} : { oauthQuery: data.oauthQuery }),
+        },
         getRequest().headers,
         data.invitation,
       );
-      return respondOk({ state });
+      return respondOk(result);
     } catch (error) {
       return respondWithFailure(error, accountContext("auth.sign_up"), {
         fallback:

@@ -66,15 +66,24 @@ import {
   type ConnectorOAuthService,
 } from "../paseo-connector/flow.js";
 
+export interface AccountAuthentication {
+  state: "complete" | "verificationRequired";
+  /** The provider's re-signed continuation URL, only when authenticating a connector request. */
+  redirectTo?: string;
+}
+
 export interface AuthServer {
   handle(request: Request): Promise<Response>;
   browserAccount?(request: Request): Promise<Response>;
-  signInEmail?(data: { email: string; password: string }, headers: Headers): Promise<"complete">;
+  signInEmail?(
+    data: { email: string; password: string; oauthQuery?: string | undefined },
+    headers: Headers,
+  ): Promise<AccountAuthentication>;
   signUpEmail?(
-    data: { name: string; email: string; password: string },
+    data: { name: string; email: string; password: string; oauthQuery?: string | undefined },
     headers: Headers,
     invitationId?: string,
-  ): Promise<"complete" | "verificationRequired">;
+  ): Promise<AccountAuthentication>;
   sendVerificationEmail?(email: string, headers: Headers, invitationId?: string): Promise<void>;
   requestPasswordReset?(email: string, headers: Headers): Promise<void>;
   resetPassword?(data: { token: string; newPassword: string }, headers: Headers): Promise<void>;
@@ -316,8 +325,9 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
   const connector = connectorService();
 
   return {
-    handle(request) {
-      const path = new URL(request.url).pathname;
+    async handle(request) {
+      const url = new URL(request.url);
+      const path = url.pathname;
       if (connector !== undefined && CONNECTOR_OAUTH_PATHS.has(path)) {
         return connectorOAuthRequest(request, path);
       }
@@ -331,13 +341,17 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
       }
       if (path === "/api/auth/sign-up/email") {
         return registration
-          .handleSignUp(request, (admittedRequest) => auth.handler(admittedRequest))
+          .handleSignUp(request, (admittedRequest) => signupAsBrowser(admittedRequest, request))
           .catch((error: unknown) => {
             if (error instanceof RegistrationAdmissionError) {
               return Response.json({ error: "registration_closed" }, { status: 403 });
             }
             throw error;
           });
+      }
+      if (path === "/api/auth/verify-email") {
+        const response = await auth.handler(request);
+        return continueVerifiedSignup(response, request.headers);
       }
       if (path === "/api/auth/change-password") {
         const rejected = rejectCrossOriginCookieMutation(
@@ -365,18 +379,54 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     },
     async signInEmail(data, headers) {
       requireBrowserOrigin(headers, headersBrowserOrigin(headers, browserOrigin));
-      await auth.api.signInEmail({ body: data, headers });
-      return "complete";
+      const { oauthQuery, ...credentials } = data;
+      const body = {
+        ...credentials,
+        ...(oauthQuery === undefined ? {} : { oauth_query: oauthQuery }),
+      };
+      const result = await auth.api.signInEmail({
+        body,
+        headers,
+        // Provider authorization hooks read the browser request, including its headers.
+        request: new Request(new URL("/api/auth/sign-in/email", options.baseURL), {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+        }),
+        asResponse: false,
+      });
+      return authenticationResult(result, oauthQuery, "complete");
     },
     async signUpEmail(data, headers, invitationId) {
       requireBrowserOrigin(headers, headersBrowserOrigin(headers, browserOrigin));
-      await registration.withAdmission(data.email, invitationId, async () => {
-        await auth.api.signUpEmail({
-          body: { ...data, callbackURL: accountCallback(options.baseURL, invitationId) },
+      const { oauthQuery, ...credentials } = data;
+      const body = {
+        ...credentials,
+        callbackURL: signupCallback(oauthQuery, invitationId),
+        ...(oauthQuery === undefined ? {} : { oauth_query: oauthQuery }),
+      };
+      const result = await registration.withAdmission(data.email, invitationId, () =>
+        auth.api.signUpEmail({
+          body,
           headers,
-        });
-      });
-      return accountMailer === undefined ? "complete" : "verificationRequired";
+          request: new Request(new URL("/api/auth/sign-up/email", options.baseURL), {
+            method: "POST",
+            headers,
+            body: JSON.stringify(body),
+          }),
+          asResponse: false,
+          returnHeaders: true,
+        }),
+      );
+      const state = accountMailer === undefined ? "complete" : "verificationRequired";
+      if (oauthQuery === undefined || state === "verificationRequired") return { state };
+      const redirectTo = await continueCreatedAccount(
+        result.response,
+        result.headers,
+        headers,
+        invitationId,
+      );
+      return { state, redirectTo };
     },
     async sendVerificationEmail(email, headers, invitationId) {
       requireBrowserOrigin(headers, headersBrowserOrigin(headers, browserOrigin));
@@ -510,6 +560,152 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
       revokeConnection: async (input, headers) =>
         revokeConnectorConnection(await mutation(headers), input),
     };
+  }
+
+  function authenticationResult(
+    result: unknown,
+    oauthQuery: string | undefined,
+    state: AccountAuthentication["state"],
+  ): AccountAuthentication {
+    if (oauthQuery === undefined) return { state };
+    return { state, redirectTo: authenticationRedirect(result) };
+  }
+
+  /** Accept only the provider's signed Hub continuation, never a client-controlled redirect. */
+  function authenticationRedirect(result: unknown): string {
+    const parsed = z.object({ url: z.string() }).safeParse(result);
+    if (!parsed.success) throw new ConnectorFlowError("authorization_failed");
+    const url = new URL(parsed.data.url, browserOrigin);
+    if (
+      url.origin !== browserOrigin ||
+      url.pathname !== "/oauth/connect" ||
+      !url.searchParams.has("sig")
+    ) {
+      throw new ConnectorFlowError("authorization_failed");
+    }
+    return `${url.pathname}${url.search}`;
+  }
+
+  /** Invitation context is a browser fragment, never an edit to the provider's signed query. */
+  function connectorInvitationRedirect(redirectTo: string, invitationId?: string): string {
+    if (invitationId === undefined) return redirectTo;
+    const url = new URL(redirectTo, browserOrigin);
+    url.hash = new URLSearchParams({ invitation: invitationId }).toString();
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+
+  function signupCallback(oauthQuery: string | undefined, invitationId?: string): string {
+    if (connector === undefined || oauthQuery === undefined) {
+      return accountCallback(options.baseURL, invitationId);
+    }
+    const query = oauthQuery.startsWith("?") ? oauthQuery : `?${oauthQuery}`;
+    return new URL(
+      connectorInvitationRedirect(`/oauth/connect${query}`, invitationId),
+      browserOrigin,
+    ).href;
+  }
+
+  /** Continue with the session the authentication endpoint just issued, not the previous account. */
+  function authenticatedHeaders(responseHeaders: Headers, browserHeaders: Headers): Headers {
+    const headers = new Headers(browserHeaders);
+    headers.set(
+      "cookie",
+      responseHeaders
+        .getSetCookie()
+        .map((value) => value.split(";", 1)[0])
+        .join("; "),
+    );
+    return headers;
+  }
+
+  async function continueCreatedAccount(
+    result: unknown,
+    responseHeaders: Headers,
+    browserHeaders: Headers,
+    invitationId?: string,
+  ): Promise<string> {
+    const next = authenticationRedirect(result);
+    const url = new URL(next, browserOrigin);
+    const redirectTo = await authorizeAsBrowser(
+      "continue",
+      { created: true, oauth_query: url.search },
+      authenticatedHeaders(responseHeaders, browserHeaders),
+    );
+    return connectorInvitationRedirect(authenticationRedirect({ url: redirectTo }), invitationId);
+  }
+
+  async function signupAsBrowser(request: Request, originalRequest: Request): Promise<Response> {
+    const body = z.record(z.string(), z.unknown()).parse(await request.clone().json());
+    const oauthQuery = typeof body["oauth_query"] === "string" ? body["oauth_query"] : undefined;
+    if (connector === undefined || oauthQuery === undefined) return auth.handler(request);
+    const originalBody = z
+      .record(z.string(), z.unknown())
+      .parse(await originalRequest.clone().json());
+    const invitationId =
+      new URL(request.url).searchParams.get("invitation") ??
+      (typeof originalBody["invitation"] === "string" ? originalBody["invitation"] : undefined);
+    const response = await auth.handler(
+      new Request(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify({ ...body, callbackURL: signupCallback(oauthQuery, invitationId) }),
+      }),
+    );
+    if (!response.ok || accountMailer !== undefined) return response;
+    const redirectTo = await continueCreatedAccount(
+      await response.clone().json(),
+      response.headers,
+      request.headers,
+      invitationId,
+    );
+    const headers = new Headers(response.headers);
+    headers.delete("content-length");
+    return Response.json({ url: redirectTo, redirect: true }, { headers });
+  }
+
+  async function continueVerifiedSignup(
+    response: Response,
+    browserHeaders: Headers,
+  ): Promise<Response> {
+    if (connector === undefined || response.status !== 302) return response;
+    const location = response.headers.get("location");
+    if (location === null) return response;
+    const callback = new URL(location, browserOrigin);
+    if (
+      callback.origin !== browserOrigin ||
+      callback.pathname !== "/oauth/connect" ||
+      !callback.searchParams.has("sig") ||
+      !(callback.searchParams.get("prompt") ?? "").split(" ").includes("create")
+    )
+      return response;
+    const headers = authenticatedHeaders(response.headers, browserHeaders);
+    const session = await sessions.read(headers);
+    if (session === undefined || session.mustChangePassword) return response;
+    const user = await options.database.query<{ created_at: Date }>(
+      'select created_at from "user" where id = $1',
+      [session.userId],
+    );
+    const issuedAt = Number(callback.searchParams.get("ba_iat"));
+    // Verification of an older account is not creation for this authorization request.
+    if (
+      !Number.isFinite(issuedAt) ||
+      issuedAt <= 0 ||
+      user.rows[0] === undefined ||
+      new Date(user.rows[0].created_at).getTime() < issuedAt
+    )
+      return response;
+    const next = await authorizeAsBrowser(
+      "continue",
+      { created: true, oauth_query: callback.search },
+      headers,
+    );
+    const continued = new Headers(response.headers);
+    const invitationId = new URLSearchParams(callback.hash.slice(1)).get("invitation") ?? undefined;
+    continued.set(
+      "location",
+      connectorInvitationRedirect(authenticationRedirect({ url: next }), invitationId),
+    );
+    return new Response(response.body, { status: response.status, headers: continued });
   }
 
   /** Drives the library's continue/consent endpoint as the signed-in browser, cookie and all. */

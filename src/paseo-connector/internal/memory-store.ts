@@ -145,6 +145,14 @@ export class MemoryConnectorStore implements ConnectorStore {
     return structuredClone(stored);
   }
 
+  async findOperationByRequestKey(identity: Identity, requestKey: string) {
+    for (const operation of this.operations.values()) {
+      if (operation.requestKey === requestKey && sameIdentity(operation, identity))
+        return structuredClone(operation);
+    }
+    return undefined;
+  }
+
   async findOperation(identity: Identity, id: string) {
     const operation = this.operations.get(id);
     return operation !== undefined && sameIdentity(operation, identity)

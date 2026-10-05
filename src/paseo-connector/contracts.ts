@@ -176,6 +176,11 @@ export interface ConnectorStore {
    * existing row unchanged; a different fingerprint throws request_conflict.
    */
   beginOperation(input: ConnectorOperation): Promise<ConnectorOperation>;
+  /** Read-only lookup by the owning identity's request key; never claims a new operation. */
+  findOperationByRequestKey(
+    identity: Identity,
+    requestKey: string,
+  ): Promise<ConnectorOperation | undefined>;
   findOperation(identity: Identity, id: string): Promise<ConnectorOperation | undefined>;
   /**
    * One transaction: marks a "creating" launch operation "created" with its agent and workspace and

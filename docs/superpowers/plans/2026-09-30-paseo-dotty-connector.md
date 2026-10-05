@@ -4,10 +4,9 @@
 > contract: any standards-compatible remote MCP client that implements MCP OAuth can link and use it, and no
 > code path depends on the calling client's vendor. "Dotty" is the user's own nickname for one OpenAI Dots
 > client and is the first planned live test, not a requirement. Steps that named Dotty or ChatGPT now name a
-> hosted MCP client, and hosted-client verification is a separate live gate for each client. The dev-tools
-> originals of the specification and this plan (commits `1a461e4f` and `a9f201a1`) remain the historical
-> record, and so do the task commit messages below; this file keeps its original name because the
-> implementation ledger refers to it. Behaviour decided during implementation review is listed in the
+> hosted MCP client, and hosted-client verification is a separate live gate for each client. These documents
+> record the design and implementation plan. Their original filenames are retained for historical
+> continuity. Behaviour decided during implementation review is listed in the
 > specification's revision note (owner/admin-only linking, the `PASEO_HUB_PASEO_CONNECTOR` opt-in, resource
 > defaulting and canonical comparison, deny is final, refresh pre-check, Connected apps by client name). The
 > provider-neutral revision added `src/paseo-connector/interoperability.integration.test.ts`: two
@@ -21,7 +20,7 @@
 
 **Tech Stack:** Hub 0.10.0 baseline; TypeScript, TanStack Start, Better Auth 1.6.23, `@better-auth/oauth-provider` 1.6.23, Drizzle 0.45.2, PostgreSQL/PGlite, Zod 4, existing MCP SDK 1.30.x, Vitest.
 
-**Spec:** `docs/superpowers/specs/2026-09-30-paseo-dotty-connector-design.md` in dev-tools, approved in chat and committed as `1a461e4f`. Read the specification and this plan together. Product files below are relative to the **Hub checkout**, not this dev-tools checkout.
+**Spec:** [Connector design](../specs/2026-09-30-paseo-dotty-connector-design.md). Read the specification and this plan together. Product paths below are relative to the Hub checkout.
 
 ## Global Constraints
 

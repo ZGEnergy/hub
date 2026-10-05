@@ -210,16 +210,11 @@ export class ConnectorRepository implements ConnectorStore {
     const inserted = await this.insertOperation(input);
     if (inserted.rows[0] !== undefined) return toOperation(inserted.rows[0]);
     // The key already exists. Only the same identity may read it back, and only for the same work.
-    const existing = await this.runtime.query<OperationRow>(
-      `select ${OPERATION_COLUMNS} from connector_operations o
-       where ${identityMatch("o", 1)} and o.request_key = $5`,
-      [...identityParams(input), input.requestKey],
-    );
-    const row = existing.rows[0];
-    if (row === undefined) throw new ConnectorError("not_found");
-    if (row.request_fingerprint !== input.requestFingerprint || row.kind !== input.kind)
+    const existing = await this.findOperationByRequestKey(input, input.requestKey);
+    if (existing === undefined) throw new ConnectorError("not_found");
+    if (existing.requestFingerprint !== input.requestFingerprint || existing.kind !== input.kind)
       throw new ConnectorError("request_conflict");
-    return toOperation(row);
+    return existing;
   }
 
   private async insertOperation(input: ConnectorOperation) {
@@ -255,6 +250,15 @@ export class ConnectorRepository implements ConnectorStore {
       if (hasPgCode(error, FOREIGN_KEY_VIOLATION)) throw new ConnectorError("not_found");
       throw error;
     }
+  }
+
+  async findOperationByRequestKey(identity: Identity, requestKey: string) {
+    const result = await this.runtime.query<OperationRow>(
+      `select ${OPERATION_COLUMNS} from connector_operations o
+       where ${identityMatch("o", 1)} and o.request_key = $5`,
+      [...identityParams(identity), requestKey],
+    );
+    return result.rows[0] === undefined ? undefined : toOperation(result.rows[0]);
   }
 
   async findOperation(identity: Identity, id: string) {

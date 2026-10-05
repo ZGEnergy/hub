@@ -148,6 +148,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
     browser: Browser,
     clientId: string,
     scope = "paseo:read paseo:run offline_access",
+    prompt?: "login" | "create",
   ) {
     const pkce = newPkce();
     const state = randomUUID();
@@ -160,6 +161,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
       code_challenge: pkce.challenge,
       code_challenge_method: "S256",
       resource: RESOURCE,
+      ...(prompt === undefined ? {} : { prompt }),
     });
     expect(response.status).toBe(302);
     const location = new URL(response.headers.get("location") ?? "", ORIGIN);
@@ -298,6 +300,334 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
       [await browser.userId(), organizationId, role],
     );
   }
+
+  it.each([
+    ["login", false],
+    ["login", true],
+    ["create", false],
+    ["create", true],
+  ] as const)(
+    "completes explicit prompt=%s with an existing session=%s only after authentication and consent",
+    async (prompt, signedIn) => {
+      const existing = await operator();
+      const previousUserId = await existing.browser.userId();
+      const browser = signedIn ? existing.browser : new Browser(auth, existing.browser.email);
+      const clientId = await registerClient();
+      const request = await authorization(browser, clientId, undefined, prompt);
+      const selection = {
+        oauthQuery: request.connectQuery,
+        daemonId: existing.machine,
+        workingDirectory: "/srv/work/project",
+      };
+      await expect(connector.selectMachine(selection, browser.headers())).rejects.toMatchObject({
+        code: signedIn ? "authorization_failed" : "unauthenticated",
+      });
+      if (prompt === "login") {
+        expect(
+          await browser.rawPost("/api/auth/sign-in/email", {
+            email: browser.email,
+            password: "incorrect-password",
+            oauth_query: request.connectQuery,
+          }),
+        ).toBe(401);
+      }
+      const connectQuery = await browser.authenticateOAuth(
+        prompt,
+        request.connectQuery,
+        prompt === "create" ? `created-${randomUUID()}@example.com` : browser.email,
+      );
+      const userId = await browser.userId();
+      if (prompt === "login") {
+        expect(userId).toBe(previousUserId);
+      } else {
+        expect(userId).not.toBe(previousUserId);
+        expect(await connector.listMachines(browser.headers())).toEqual([]);
+      }
+      const machine =
+        prompt === "login" ? existing.machine : await enroll(await browser.createOrganization());
+      const forged = new URLSearchParams(connectQuery);
+      forged.set("redirect_uri", "https://attacker.example/callback");
+      await expect(
+        connector.selectMachine(
+          { ...selection, oauthQuery: forged.toString(), daemonId: machine },
+          browser.headers(),
+        ),
+      ).rejects.toBeInstanceOf(ConnectorFlowError);
+      expect(await connectorRows(browser)).toBe(0);
+      const consent = await select(browser, connectQuery, machine);
+      expect(await connector.listConnections(browser.headers())).toEqual([]);
+      const approved = await connector.decideConsent(
+        { ...consent, accept: true },
+        browser.headers(),
+      );
+      const callback = new URL(approved.redirectTo);
+      expect(`${callback.origin}${callback.pathname}`).toBe(REDIRECT_URI);
+      expect(callback.searchParams.get("state")).toBe(request.state);
+      const tokens = await exchange(
+        clientId,
+        callback.searchParams.get("code") ?? "",
+        request.verifier,
+      );
+      const principal = await principalOf(tokens);
+      expect(principal.userId).toBe(userId);
+      expect(await authorizeConnectorRequest(database, principal, "paseo:run")).toMatchObject({
+        daemonId: machine,
+        workingDirectory: "/srv/work/project",
+      });
+    },
+  );
+
+  it("does not let prompt=create bypass closed registration", async () => {
+    const { browser } = await operator();
+    const closed = createAuthServer({
+      database: bundle.runtime,
+      locks: bundle.locks,
+      entitlements: composeEntitlements(database, bundle.runtime).service,
+      secret: "connector-oauth-test-secret-at-least-32-characters",
+      baseURL: ORIGIN,
+      policy: { registrationMode: "disabled", organizationCreation: "open", bootstrap: undefined },
+      paseoConnector: true,
+    });
+    const request = await authorization(browser, await registerClient(), undefined, "create");
+    const newcomer = new Browser(closed);
+    expect(
+      await newcomer.rawPost("/api/auth/sign-up/email", {
+        name: "New operator",
+        email: newcomer.email,
+        password: "account-password",
+        oauth_query: request.connectQuery,
+      }),
+    ).toBe(403);
+    await expect(closed.connector!.listMachines(newcomer.headers())).rejects.toMatchObject({
+      code: "unauthenticated",
+    });
+    await closed.close();
+  });
+
+  it("completes explicit prompt=login through Hub's account authentication boundary", async () => {
+    const { browser, machine } = await operator();
+    const clientId = await registerClient();
+    const request = await authorization(browser, clientId, undefined, "login");
+    const credentials = {
+      email: browser.email,
+      password: "account-password",
+      oauthQuery: request.connectQuery,
+    };
+    await expect(
+      auth.signInEmail!({ ...credentials, password: "incorrect-password" }, browser.headers()),
+    ).rejects.toMatchObject({ body: { code: "INVALID_EMAIL_OR_PASSWORD" } });
+    const authenticated = z
+      .object({ state: z.literal("complete"), redirectTo: z.string() })
+      .parse(await auth.signInEmail!(credentials, browser.headers()));
+    const connect = new URL(authenticated.redirectTo, ORIGIN);
+    expect(connect.origin).toBe(ORIGIN);
+    expect(connect.pathname).toBe("/oauth/connect");
+    const consent = await select(browser, connect.search, machine);
+    expect(await connector.listConnections(browser.headers())).toEqual([]);
+    const approved = await connector.decideConsent({ ...consent, accept: true }, browser.headers());
+    const callback = new URL(approved.redirectTo);
+    expect(callback.searchParams.get("state")).toBe(request.state);
+    const tokens = await exchange(
+      clientId,
+      callback.searchParams.get("code") ?? "",
+      request.verifier,
+    );
+    expect(
+      await authorizeConnectorRequest(database, await principalOf(tokens), "paseo:run"),
+    ).toMatchObject({
+      ownerUserId: await browser.userId(),
+      daemonId: machine,
+      workingDirectory: "/srv/work/project",
+    });
+  });
+
+  it("completes explicit prompt=create only after required email verification", async () => {
+    const verifications: { url: string }[] = [];
+    const verifiedAuth = createAuthServer({
+      database: bundle.runtime,
+      locks: bundle.locks,
+      entitlements: composeEntitlements(database, bundle.runtime).service,
+      secret: "connector-oauth-test-secret-at-least-32-characters",
+      baseURL: ORIGIN,
+      policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+      accountMailer: {
+        sendVerificationEmail: async (email) => {
+          verifications.push({ url: email.url });
+        },
+        sendPasswordReset: () => Promise.resolve(),
+      },
+      paseoConnector: true,
+    });
+    const browser = new Browser(verifiedAuth);
+    const clientId = await registerClient();
+    const request = await authorization(browser, clientId, undefined, "create");
+    expect(
+      await browser.rawPost("/api/auth/sign-up/email", {
+        name: "Verified operator",
+        email: browser.email,
+        password: "account-password",
+        oauth_query: request.connectQuery,
+      }),
+    ).toBe(200);
+    await expect(verifiedAuth.connector!.listMachines(browser.headers())).rejects.toMatchObject({
+      code: "unauthenticated",
+    });
+    expect(
+      await browser.rawPost("/api/auth/sign-in/email", {
+        email: browser.email,
+        password: "account-password",
+        oauth_query: request.connectQuery,
+      }),
+    ).toBe(403);
+    expect(verifications).toHaveLength(1);
+    const connectQuery = await browser.verifyOAuth(verifications[0]!.url);
+    const machine = await enroll(await browser.createOrganization());
+    const consent = await select(browser, connectQuery.search, machine);
+    expect(await verifiedAuth.connector!.listConnections(browser.headers())).toEqual([]);
+    const approved = await verifiedAuth.connector!.decideConsent(
+      { ...consent, accept: true },
+      browser.headers(),
+    );
+    const callback = new URL(approved.redirectTo);
+    expect(callback.searchParams.get("state")).toBe(request.state);
+    const tokens = await exchange(
+      clientId,
+      callback.searchParams.get("code") ?? "",
+      request.verifier,
+    );
+    expect(
+      await authorizeConnectorRequest(database, await principalOf(tokens), "paseo:run"),
+    ).toMatchObject({
+      ownerUserId: await browser.userId(),
+      daemonId: machine,
+    });
+    await verifiedAuth.close();
+  });
+
+  it("does not let an older account's verification satisfy prompt=create", async () => {
+    const verifications: { url: string }[] = [];
+    const verifiedAuth = createAuthServer({
+      database: bundle.runtime,
+      locks: bundle.locks,
+      entitlements: composeEntitlements(database, bundle.runtime).service,
+      secret: "connector-oauth-test-secret-at-least-32-characters",
+      baseURL: ORIGIN,
+      policy: { registrationMode: "open", organizationCreation: "open", bootstrap: undefined },
+      accountMailer: {
+        sendVerificationEmail: async (email) => {
+          verifications.push({ url: email.url });
+        },
+        sendPasswordReset: () => Promise.resolve(),
+      },
+      paseoConnector: true,
+    });
+    const browser = new Browser(verifiedAuth);
+    await browser.signUp();
+    await bundle.runtime.query(
+      "update \"user\" set created_at = timestamp '2000-01-01 00:00:00' where email = $1",
+      [browser.email],
+    );
+    const request = await authorization(browser, await registerClient(), undefined, "create");
+    const link = new URL(verifications[0]!.url);
+    link.searchParams.set("callbackURL", `${ORIGIN}/oauth/connect${request.connectQuery}`);
+    const connectQuery = await browser.verifyOAuth(link.href);
+    const machine = await enroll(await browser.createOrganization());
+    await expect(
+      verifiedAuth.connector!.selectMachine(
+        {
+          oauthQuery: connectQuery.search,
+          daemonId: machine,
+          workingDirectory: "/srv/work/project",
+        },
+        browser.headers(),
+      ),
+    ).rejects.toMatchObject({ code: "authorization_failed" });
+    expect(await verifiedAuth.connector!.listConnections(browser.headers())).toEqual([]);
+    await verifiedAuth.close();
+  });
+
+  it.each([false, true])(
+    "preserves explicit invitation acceptance during prompt=create with email verification=%s",
+    async (requiresVerification) => {
+      const owner = await operator();
+      const verifications: { url: string }[] = [];
+      const invitedAuth = createAuthServer({
+        database: bundle.runtime,
+        locks: bundle.locks,
+        entitlements: composeEntitlements(database, bundle.runtime).service,
+        secret: "connector-oauth-test-secret-at-least-32-characters",
+        baseURL: ORIGIN,
+        policy: {
+          registrationMode: "invite_only",
+          organizationCreation: "disabled",
+          bootstrap: undefined,
+        },
+        ...(requiresVerification
+          ? {
+              accountMailer: {
+                sendVerificationEmail: async (email: { url: string }) => {
+                  verifications.push({ url: email.url });
+                },
+                sendPasswordReset: () => Promise.resolve(),
+              },
+            }
+          : {}),
+        paseoConnector: true,
+      });
+      const browser = new Browser(invitedAuth);
+      const invitationId = randomUUID();
+      await bundle.runtime.query(
+        `insert into invitation (id, organization_id, email, role, status, expires_at, inviter_id)
+         values ($1, $2, $3, 'admin', 'pending', $4, $5)`,
+        [
+          invitationId,
+          owner.organizationId,
+          browser.email,
+          new Date(Date.now() + 60_000),
+          await owner.browser.userId(),
+        ],
+      );
+      const clientId = await registerClient();
+      const request = await authorization(browser, clientId, undefined, "create");
+      const signup = await browser.signupWithInvitation(request.connectQuery, invitationId);
+      const connect = requiresVerification
+        ? await browser.verifyOAuth(verifications[0]!.url)
+        : new URL(z.object({ url: z.string() }).parse(await signup.json()).url, ORIGIN);
+      expect(await invitedAuth.connector!.listMachines(browser.headers())).toEqual([]);
+      const carriedInvitation = new URLSearchParams(connect.hash.slice(1)).get("invitation") ?? "";
+      // The callback-derived credential is consumed by the same explicit account action as the UI.
+      expect(
+        await browser.rawPost("/api/auth/paseo/accept-invitation", {
+          invitationId: carriedInvitation,
+        }),
+      ).toBe(200);
+      expect(
+        (await invitedAuth.connector!.listMachines(browser.headers()))
+          .map((machine) => machine.daemonId)
+          .sort(),
+      ).toEqual([owner.machine, owner.otherMachine].sort());
+      const consent = await select(browser, connect.search, owner.machine);
+      expect(await invitedAuth.connector!.listConnections(browser.headers())).toEqual([]);
+      const approved = await invitedAuth.connector!.decideConsent(
+        { ...consent, accept: true },
+        browser.headers(),
+      );
+      const callback = new URL(approved.redirectTo);
+      const tokens = await exchange(
+        clientId,
+        callback.searchParams.get("code") ?? "",
+        request.verifier,
+      );
+      expect(
+        await authorizeConnectorRequest(database, await principalOf(tokens), "paseo:run"),
+      ).toMatchObject({
+        ownerUserId: await browser.userId(),
+        daemonId: owner.machine,
+        organizationId: owner.organizationId,
+      });
+      await invitedAuth.close();
+    },
+  );
 
   it("requires password rotation before selecting or approving a connector", async () => {
     const { browser, machine } = await operator();
@@ -1155,6 +1485,48 @@ class Browser {
     );
     expect(response.status).toBe(200);
     this.rememberCookie(response);
+  }
+
+  async authenticateOAuth(prompt: "login" | "create", oauthQuery: string, email: string) {
+    const response = await this.auth.handle(
+      this.post(prompt === "login" ? "/api/auth/sign-in/email" : "/api/auth/sign-up/email", {
+        email,
+        password: "account-password",
+        ...(prompt === "create" ? { name: "New operator" } : {}),
+        oauth_query: oauthQuery,
+      }),
+    );
+    expect(response.status).toBe(200);
+    this.rememberCookie(response);
+    const result = z.object({ url: z.string() }).parse(await response.json());
+    const connect = new URL(result.url, this.origin);
+    expect(connect.origin).toBe(this.origin);
+    expect(connect.pathname).toBe("/oauth/connect");
+    return connect.search;
+  }
+
+  async verifyOAuth(url: string) {
+    const response = await this.auth.handle(new Request(url));
+    expect(response.status).toBe(302);
+    this.rememberCookie(response);
+    const connect = new URL(response.headers.get("location") ?? "", this.origin);
+    expect(connect.origin).toBe(this.origin);
+    expect(connect.pathname).toBe("/oauth/connect");
+    return connect;
+  }
+
+  async signupWithInvitation(oauthQuery: string, invitationId: string) {
+    const response = await this.auth.handle(
+      this.post(`/api/auth/sign-up/email?invitation=${encodeURIComponent(invitationId)}`, {
+        name: "Invited operator",
+        email: this.email,
+        password: "account-password",
+        oauth_query: oauthQuery,
+      }),
+    );
+    expect(response.status).toBe(200);
+    this.rememberCookie(response);
+    return response;
   }
 
   async userId(): Promise<string> {

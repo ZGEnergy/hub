@@ -75,6 +75,7 @@ interface DaemonAgent {
  * agents are "Agent not found", and timelines page by epoch and sequence with stale-cursor resets.
  */
 class DaemonDouble implements AgentConnection {
+  readonly catalog = structuredClone(CATALOG);
   readonly calls: { method: string; args: unknown[] }[] = [];
   readonly agents = new Map<string, DaemonAgent>();
   readonly delivered: { agentId: string; messageId: string; text: string }[] = [];
@@ -252,7 +253,7 @@ function daemonConnection(daemon: DaemonDouble): DaemonConnection {
       return {
         requestId: randomUUID(),
         ...(cwd === undefined ? {} : { cwd }),
-        entries: structuredClone(CATALOG),
+        entries: structuredClone(daemon.catalog),
         generatedAt: T0.toISOString(),
       };
     },
@@ -376,14 +377,14 @@ afterAll(async () => {
   await postgres?.stop();
 });
 
-describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector service on %s", (kind) => {
+describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector service on %s", (db) => {
   let root: string;
   let bundle: DatabaseRuntimeBundle;
   let database: Database;
 
   beforeAll(async () => {
     root = await mkdtemp(join(tmpdir(), "hub-connector-service-"));
-    if (kind === "embedded") {
+    if (db === "embedded") {
       bundle = await embeddedDatabaseRuntime(join(root, "database"));
     } else {
       const url = new URL(postgres.getConnectionUri());
@@ -430,6 +431,233 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector service 
         [identity.connectionId],
       )
     ).rows[0]!.count;
+
+  describe("durable replay prerequisites", () => {
+    it.each(["launch", "message"] as const)(
+      "replays %s acceptance offline and conflicts before contacting the daemon",
+      async (kind) => {
+        const request = launch();
+        const started = await service.startAgent(alice.principal, request);
+        const message = {
+          request_key: randomUUID(),
+          agent_id: started.agentId!,
+          text: "Also add tests",
+        };
+        const first =
+          kind === "launch" ? started : await service.sendAgentMessage(alice.principal, message);
+        online = false;
+        daemon.calls.length = 0;
+
+        const replay =
+          kind === "launch"
+            ? service.startAgent(alice.principal, request)
+            : service.sendAgentMessage(alice.principal, message);
+        expect(await replay).toEqual({
+          operationId: first.operationId,
+          state: "accepted",
+          agentId: "agent-1",
+          workspaceId: kind === "launch" ? "workspace-agent-1" : null,
+        });
+        const conflict =
+          kind === "launch"
+            ? service.startAgent(alice.principal, { ...request, task: "Different task" })
+            : service.sendAgentMessage(alice.principal, { ...message, text: "Different message" });
+        expect((await rejection(conflict)).code).toBe("request_conflict");
+        await expect(
+          service.sendAgentMessage(alice.principal, {
+            ...message,
+            request_key: request.request_key,
+          }),
+        ).rejects.toMatchObject({ code: "request_conflict" });
+        expect(daemon.calls).toEqual([]);
+        expect([...daemon.agents.keys()]).toEqual(["agent-1"]);
+        expect(daemon.delivered).toMatchObject(
+          kind === "launch"
+            ? [{ text: "Fix the failing build" }]
+            : [{ text: "Fix the failing build" }, { text: "Also add tests" }],
+        );
+        expect(await operationsOf(alice.identity)).toBe(kind === "launch" ? 1 : 2);
+      },
+    );
+
+    it.each(["provider", "model"] as const)(
+      "replays a launch when its %s becomes unavailable but refuses new execution",
+      async (unavailable) => {
+        const request = launch({ model: "best" });
+        const started = await service.startAgent(alice.principal, request);
+        if (unavailable === "provider") daemon.catalog[0]!.status = "error";
+        else daemon.catalog[0]!.models = [];
+        daemon.calls.length = 0;
+
+        expect(await service.startAgent(alice.principal, request)).toEqual({
+          operationId: started.operationId,
+          state: "accepted",
+          agentId: "agent-1",
+          workspaceId: "workspace-agent-1",
+        });
+        await expect(
+          service.startAgent(alice.principal, { ...request, model: "missing" }),
+        ).rejects.toMatchObject({ code: "request_conflict" });
+        expect(daemon.calls).toEqual([]);
+        const error = await rejection(
+          service.startAgent(alice.principal, { ...request, request_key: randomUUID() }),
+        );
+        expect(error.code).toBe("runtime_unavailable");
+        expect(error.details).toBeUndefined();
+        expect(daemon.calledMethods()).toEqual(["snapshot"]);
+        expect(await operationsOf(alice.identity)).toBe(1);
+        expect([...daemon.agents.keys()]).toEqual(["agent-1"]);
+        expect(daemon.delivered).toMatchObject([{ text: "Fix the failing build" }]);
+      },
+    );
+
+    it.each(["launch", "message"] as const)(
+      "replays an unknown %s outcome offline without repeating the effect",
+      async (kind) => {
+        const request = launch();
+        const message = { request_key: randomUUID(), agent_id: "agent-1", text: "Also add tests" };
+        if (kind === "launch") daemon.createFault = "lost";
+        else {
+          await service.startAgent(alice.principal, request);
+          daemon.sendFault = "lost";
+        }
+        const first = await rejection(
+          kind === "launch"
+            ? service.startAgent(alice.principal, request)
+            : service.sendAgentMessage(alice.principal, message),
+        );
+        expect(first.code).toBe("outcome_unknown");
+        online = false;
+        daemon.calls.length = 0;
+
+        const replay = await rejection(
+          kind === "launch"
+            ? service.startAgent(alice.principal, request)
+            : service.sendAgentMessage(alice.principal, message),
+        );
+        expect(replay).toMatchObject({
+          code: "outcome_unknown",
+          details: {
+            operationId: first.details!.operationId,
+            state: "outcome_unknown",
+            ...(kind === "message" ? { agentId: "agent-1" } : {}),
+          },
+        });
+        expect(daemon.calls).toEqual([]);
+        expect([...daemon.agents.keys()]).toEqual(["agent-1"]);
+        expect(daemon.delivered).toMatchObject(
+          kind === "launch" ? [] : [{ text: "Fix the failing build" }, { text: "Also add tests" }],
+        );
+        expect(await operationsOf(alice.identity)).toBe(kind === "launch" ? 1 : 2);
+      },
+    );
+
+    it.each([
+      { kind: "launch", state: "creating", unavailable: "offline" },
+      { kind: "launch", state: "created", unavailable: "provider" },
+      { kind: "message", state: "creating", unavailable: "offline" },
+    ] as const)(
+      "replays a $state $kind while $unavailable without waiting for the original acknowledgement",
+      async ({ kind, state, unavailable }) => {
+        const request = launch();
+        const message = { request_key: randomUUID(), agent_id: "agent-1", text: "Also add tests" };
+        if (kind === "message") await service.startAgent(alice.principal, request);
+        let release = () => {};
+        const held = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let notifyEntered = () => {};
+        const entered = new Promise<void>((resolve) => {
+          notifyEntered = resolve;
+        });
+        const hold = () => {
+          notifyEntered();
+          return held;
+        };
+        if (kind === "launch" && state === "creating") daemon.beforeCreate = hold;
+        else daemon.beforeSend = hold;
+        const running =
+          kind === "launch"
+            ? service.startAgent(alice.principal, request)
+            : service.sendAgentMessage(alice.principal, message);
+        try {
+          await entered;
+          const operation = (
+            await bundle.runtime.query<{ id: string }>(
+              "select id from connector_operations where connection_id = $1 and request_key = $2",
+              [
+                alice.identity.connectionId,
+                kind === "launch" ? request.request_key : message.request_key,
+              ],
+            )
+          ).rows[0]!;
+          if (unavailable === "offline") online = false;
+          else daemon.catalog[0]!.status = "error";
+          daemon.calls.length = 0;
+
+          const replay =
+            kind === "launch"
+              ? service.startAgent(alice.principal, request)
+              : service.sendAgentMessage(alice.principal, message);
+          expect(await replay).toEqual({
+            operationId: operation.id,
+            state,
+            agentId: kind === "launch" && state === "creating" ? null : "agent-1",
+            workspaceId: state === "created" ? "workspace-agent-1" : null,
+          });
+          expect(daemon.calls).toEqual([]);
+        } finally {
+          release();
+          await running;
+        }
+        expect([...daemon.agents.keys()]).toEqual(["agent-1"]);
+        expect(daemon.delivered).toMatchObject(
+          kind === "launch"
+            ? [{ text: "Fix the failing build" }]
+            : [{ text: "Fix the failing build" }, { text: "Also add tests" }],
+        );
+        expect(await operationsOf(alice.identity)).toBe(kind === "launch" ? 1 : 2);
+      },
+    );
+
+    it("keeps replay authorization current and request keys isolated to their connection", async () => {
+      const request = launch();
+      const started = await service.startAgent(alice.principal, request);
+      const message = {
+        request_key: randomUUID(),
+        agent_id: started.agentId!,
+        text: "Also add tests",
+      };
+      await service.sendAgentMessage(alice.principal, message);
+      online = false;
+      daemon.calls.length = 0;
+      const foreign = { ...alice.principal, userId: machine.bob };
+      const reader = { ...alice.principal, scopes: ["paseo:read"] };
+      for (const [principal, code] of [
+        [foreign, "not_found"],
+        [reader, "insufficient_scope"],
+      ] as const) {
+        expect((await rejection(service.startAgent(principal, request))).code).toBe(code);
+        expect((await rejection(service.sendAgentMessage(principal, message))).code).toBe(code);
+      }
+      expect((await rejection(service.startAgent(bob.principal, request))).code).toBe(
+        "machine_offline",
+      );
+      expect((await rejection(service.sendAgentMessage(bob.principal, message))).code).toBe(
+        "not_found",
+      );
+      await database.connector.revokeConnection(machine.alice, alice.principal.connectionId, T0);
+      expect((await rejection(service.startAgent(alice.principal, request))).code).toBe(
+        "connection_revoked",
+      );
+      expect((await rejection(service.sendAgentMessage(alice.principal, message))).code).toBe(
+        "connection_revoked",
+      );
+      expect(daemon.calls).toEqual([]);
+      expect(await operationsOf(alice.identity)).toBe(2);
+      expect(await operationsOf(bob.identity)).toBe(0);
+    });
+  });
 
   it("records ownership before sending the task, then reports the launch accepted", async () => {
     const ownedAtSend: string[][] = [];

@@ -271,9 +271,6 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
       const input = StartAgentInput.parse(raw);
       const authorized = await authorizeConnectorRequest(database, principal, "paseo:run");
       const identity = identityOf(authorized);
-      // Offline is decided before any operation exists, so none can claim daemon acceptance.
-      const daemon = live(identity);
-      const runtime = await requireRuntime(daemon, authorized.workingDirectory, input);
       const fingerprint = fingerprintOf({
         kind: "launch",
         task: input.task,
@@ -282,6 +279,15 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
         model: input.model ?? null,
         mode: input.mode ?? null,
       });
+      const existing = await store.findOperationByRequestKey(identity, input.request_key);
+      if (existing !== undefined) {
+        if (existing.kind !== "launch" || existing.requestFingerprint !== fingerprint)
+          throw new ConnectorError("request_conflict");
+        return resultForExistingOperation(existing);
+      }
+      // Only new work needs a live runtime; failed prerequisites never claim a request key.
+      const daemon = live(identity);
+      const runtime = await requireRuntime(daemon, authorized.workingDirectory, input);
       // The atomic request-key claim is the exclusion: exactly one caller inserts the operation and
       // runs the sequence; every concurrent or later caller gets the recorded disposition.
       const id = newId();
@@ -298,8 +304,7 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
         state: "creating",
         errorCode: null,
       });
-      // ponytail: a launch left "creating" by a crash stays pending; reconcile by re-creating
-      // with its stored creationKey, which the daemon dedupes.
+      // Another caller may have claimed the key while prerequisites were checked.
       if (operation.id !== id) return resultForExistingOperation(operation);
       const settle = settler(store, identity, operation.id, report);
 
@@ -433,12 +438,18 @@ export function createConnectorService(options: ConnectorServiceOptions): Connec
       const authorized = await authorizeConnectorRequest(database, principal, "paseo:run");
       const identity = identityOf(authorized);
       const owned = await requireOwnedAgent(store, identity, input.agent_id);
-      const daemon = live(identity);
       const fingerprint = fingerprintOf({
         kind: "message",
         agentId: owned.agentId,
         text: input.text,
       });
+      const existing = await store.findOperationByRequestKey(identity, input.request_key);
+      if (existing !== undefined) {
+        if (existing.kind !== "message" || existing.requestFingerprint !== fingerprint)
+          throw new ConnectorError("request_conflict");
+        return resultForExistingOperation(existing);
+      }
+      const daemon = live(identity);
       const id = newId();
       const operation = await store.beginOperation({
         ...identity,

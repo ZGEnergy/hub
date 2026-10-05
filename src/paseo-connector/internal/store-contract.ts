@@ -334,6 +334,7 @@ export function describeConnectorStoreContract(open: () => Promise<ConnectorStor
     );
     expect(again).toEqual(first);
     expect(await fixture.store.findOperation(alice, first.id)).toEqual(first);
+    expect(await fixture.store.findOperationByRequestKey(alice, first.requestKey)).toEqual(first);
   });
 
   it("returns the same single operation to concurrent callers sharing a key", async () => {
@@ -374,6 +375,8 @@ export function describeConnectorStoreContract(open: () => Promise<ConnectorStor
     );
     expect(forBob.id).not.toBe(forAlice.id);
     expect(forBob.connectionId).toBe(bob.connectionId);
+    expect(await fixture.store.findOperationByRequestKey(alice, "k")).toEqual(forAlice);
+    expect(await fixture.store.findOperationByRequestKey(bob, "k")).toEqual(forBob);
   });
 
   it("refuses an operation whose identity differs from its connection in any column", async () => {
@@ -394,6 +397,9 @@ export function describeConnectorStoreContract(open: () => Promise<ConnectorStor
         "not_found",
       );
       expect(await fixture.store.findOperation(identity, existing.id)).toBe(undefined);
+      expect(await fixture.store.findOperationByRequestKey(identity, existing.requestKey)).toBe(
+        undefined,
+      );
     }
   });
 

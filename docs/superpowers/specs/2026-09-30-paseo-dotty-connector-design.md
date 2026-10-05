@@ -1,7 +1,7 @@
 # Self-hosted Paseo Agent Connector
 
 Date: 2026-09-30
-Status: Architecture approved in chat; revised 2026-10-01 to a provider-neutral contract.
+Status: Design record, revised 2026-10-01 to a provider-neutral contract.
 
 > **Revision 2026-10-01.** The product is renamed the **Paseo Agent Connector**. Its contract is
 > provider-neutral: any standards-compatible remote MCP client that implements MCP OAuth (dynamic client
@@ -9,8 +9,8 @@ Status: Architecture approved in chat; revised 2026-10-01 to a provider-neutral 
 > Hub depends on the calling client's vendor. "Dotty" is the user's own nickname for one OpenAI Dots client;
 > it remains the first planned live test, not a requirement. Requirements below that named Dotty or ChatGPT
 > now name a hosted MCP client, and hosted-client verification is a separate live gate for each client. The
-> dev-tools originals of this specification and its plan (commits `1a461e4f` and `a9f201a1`) remain the
-> historical record; this file keeps its original name because the implementation ledger refers to it.
+> specification and implementation plan record the design. Their original filenames are retained for
+> historical continuity.
 >
 > Behaviour decided after approval, during implementation review. Token audience binding is unchanged: every
 > token is bound to the one connector resource. Token-endpoint `resource` matching was relaxed to the RFC 8707
@@ -44,7 +44,7 @@ Approved decisions:
 - Reuse the daemon's existing outbound Hub relationship. Do not enroll a parallel Hub for the connector.
 - Use an OAuth-authenticated remote MCP interface, not a publicly exposed daemon or CLI wrapper.
 
-The original of this document lives in dev-tools as the design record. The product is implemented in `getpaseo/hub`; it is not a Paseo client/daemon plugin.
+The product is implemented in Paseo Hub and uses the daemon's existing Hub relationship.
 
 ## Evidence and compatibility gate
 

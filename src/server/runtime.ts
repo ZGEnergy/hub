@@ -21,6 +21,7 @@ import type { HomeDashboard } from "../home/dashboard.js";
 import type { Database } from "../db/types.js";
 import type { ConnectorOAuthService } from "../paseo-connector/flow.js";
 import type { ConnectorService } from "../paseo-connector/service.js";
+import type { AuthServer } from "../auth/server.js";
 
 /**
  * The public plan catalog shape is billing's own: `src/billing/public-catalog.ts` decides which
@@ -100,12 +101,8 @@ export interface ApplicationRuntime {
   paseoConnector: PaseoConnectorAccess;
   auth(request: Request): Promise<Response>;
   browserAccount?(request: Request): Promise<Response>;
-  signInEmail?(data: { email: string; password: string }, headers: Headers): Promise<"complete">;
-  signUpEmail?(
-    data: { name: string; email: string; password: string },
-    headers: Headers,
-    invitationId?: string,
-  ): Promise<"complete" | "verificationRequired">;
+  signInEmail?: AuthServer["signInEmail"];
+  signUpEmail?: AuthServer["signUpEmail"];
   sendVerificationEmail?(email: string, headers: Headers, invitationId?: string): Promise<void>;
   requestPasswordReset?(email: string, headers: Headers): Promise<void>;
   resetPassword?(data: { token: string; newPassword: string }, headers: Headers): Promise<void>;

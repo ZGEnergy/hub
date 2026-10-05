@@ -341,148 +341,49 @@ appear in it.
 
 ## Evidence
 
-Three kinds of evidence, which say different things:
+Keep three kinds of evidence separate:
 
-1. **Generic MCP and OAuth interoperability: deterministic tests.**
-   `src/paseo-connector/interoperability.integration.test.ts` (embedded PGlite and PostgreSQL) runs Hub's real
-   auth handler, MCP route and well-known routes on a loopback origin and links two independently registered
-   clients, one with an HTTPS redirect and one with a loopback redirect, each through the full challenge,
-   discovery, registration, browser sign-in, machine selection, consent, PKCE exchange and official MCP SDK
-   client. It shows that the two clients see the same tools and runtime catalog, that each one's provider
-   choice is honoured independently of the client, that their connections and agents are isolated from
-   each other (one user and two users), that codes, refresh tokens and revocations are bound to their own
-   client, that `127.0.0.1` redirects may change port while `localhost` may not, that Connected apps
-   names each client, and that an authorization without `scope` links with the client's registered scopes
-   shown at consent (or is refused at machine selection when they hold no connector scope). `src/paseo-connector/oauth.integration.test.ts` covers the resource rules.
-2. **Real local protocol and lifecycle: the connector E2E.** A real Hub production build, a source-built Paseo
-   daemon, a real Claude Code coding-agent runtime on that daemon, Hub's screens in Chromium, and the
-   official MCP TypeScript SDK as the client. See [Local verification](#local-verification). The Claude
-   Code there is the daemon-side coding agent that `start_agent` launched, not a hosted MCP client calling
-   the connector.
-3. **Actual ChatGPT and OpenAI Dots clients: user-reported execution.** The operator supplied an MCP
-   transcript from a ChatGPT agent on a MacBook using the public HTTPS test deployment at commit
-   `df5fcd9`, followed by a Dotty-specific probe. See [ChatGPT client smoke](#chatgpt-client-smoke) and
-   [OpenAI Dots probe](#openai-dots-probe). These reports do not prove other clients or every lifecycle
-   behavior.
+1. **Generic MCP and OAuth interoperability.** The integration suites run Hub's real auth, MCP and
+   discovery routes over HTTP with embedded PGlite and PostgreSQL. Independently registered hosted and
+   loopback clients complete discovery, registration, consent and PKCE exchange. The tests exercise
+   connection-owned agent isolation, caller-selected runtimes, client-bound codes and refresh tokens,
+   redirect matching, and the scopes shown at consent.
+2. **Real local lifecycle.** The opt-in connector E2E uses a Hub production build, a source-built Paseo
+   daemon, a real Claude coding runtime, browser linking and the official MCP SDK. This proves the Hub
+   and daemon path, not access by every hosted client. See [Local verification](#local-verification).
+3. **Actual hosted clients.** Operator-reported ChatGPT and OpenAI Dots execution is distinct from the
+   local tests. The reports cover the behaviors below, not universal client compatibility.
 
-### ChatGPT client smoke
+### Reported ChatGPT and OpenAI Dots execution
 
-On 2026-10-03, the operator reported the following results from the installed ChatGPT connector. These
-are user-supplied execution evidence, not a separately rerun controller test. No enrollment, permission,
-connection or file changes were reported during the smoke; revocation was not run and the connection
-remained usable.
+The ChatGPT report exercised a real file-read launch and result, repeated-key launch idempotency,
+follow-up, active-turn cancellation and connection ownership isolation. Cancellation interrupted a
+partially streamed turn, left the session accessible and produced no further output on a later read.
+These reports did not exercise client-driven revocation or automatic refresh.
 
-| Check                   | Reported result      | Evidence and boundary                                                                                                                                                                                                                                           |
-| ----------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Connection and runtimes | Partial verification | `lightning` online, selected directory and read/run/cancel scopes matched, Claude/Haiku 4.5 ready, initial agent list empty. Daemon-ID matching was not verifiable: `get_connection` returns only machine name and online state, not the daemon ID.             |
-| Launch and result       | Pass                 | Real Claude/Haiku 4.5 agent in plan mode used `Read` on `probe.txt`, returned the exact probe line and finished idle.                                                                                                                                           |
-| Launch idempotency      | Pass                 | Identical request key and arguments returned the same operation and agent; the connection still listed one agent.                                                                                                                                               |
-| Follow-up               | Pass                 | The same agent returned exactly `FOLLOWUP_OK`; cursor-based retrieval returned the new timeline entries.                                                                                                                                                        |
-| Cancellation            | Pass in follow-up    | A running, partially streamed count was observed at 23. `cancel_agent` returned `cancelRequested: true`; the agent became idle at 380 of 3000 and remained accessible. After about 3 seconds, cursor-based retrieval returned no entries and `hasNewer: false`. |
-| Ownership isolation     | Pass                 | An agent created directly on the daemon was absent from `list_agents`; direct `get_agent` returned `not_found` without disclosing a timeline.                                                                                                                   |
-| Revocation              | Not run              | The connection was left usable.                                                                                                                                                                                                                                 |
+A separate OpenAI Dots report exercised runtime discovery, a real launch, running-to-idle status and
+the completed file-read result. It did not independently verify Dots-specific follow-up, idempotency,
+cancellation, isolation, revocation or automatic refresh. These are user-reported observations, not
+separately rerun controller tests.
 
-Reported connection ID: `b028cf49-4c38-4d42-953a-a979a1a749ea`; smoke agent:
-`34ac2559-028f-4d09-8681-a723efdd9df0`; launch operation:
-`37620f06-7678-47d8-9b01-ae678088341e`. The exact file-read result was
-`PASEO_CONNECTOR_LIVE_PROBE=machine-read-confirmed`.
+### Discovery-driven persistent access
 
-The initial sleep-based cancellation attempt was not verified: the runtime blocked standalone
-`sleep 30` and the turn finished before observation. In a subsequent user-reported test, the task was
-to count from 1 to 3000, one number per line, without tools or file changes. That test directly exercised
-`cancel_agent` while the turn was running and passed the interruption, session-accessibility and
-no-further-output checks above.
+The protected-resource metadata originally omitted `offline_access` even though the authorization
+server supported it. A discovery-driven client could authorize without receiving a refresh token.
+Resource discovery now advertises all four OAuth scopes without silently changing requested access.
 
-Reported cancellation agent: `4a49b22b-f919-4576-90ef-4ab54d8c85af`; request key:
-`d7e9f3e7-73c4-4a60-a6c8-219f4f940a33`; operation:
-`db082bf6-54e5-41df-8379-2cb463e4d767`. The runtime was `claude-haiku-4-5` in `plan` mode. The final cursor
-was epoch `79396709-aff1-4582-a348-dc289e0bfc88`, sequence 66; the later read after that cursor returned
-`entries: []` and `hasNewer: false`.
+A regression follows real HTTP discovery, registers and authorizes with the discovered scopes,
+rotates refresh tokens twice and uses renewed MCP access with the original connection and permissions.
+It failed before the fix on both database backends because the refresh token was missing, then passed.
 
-These ChatGPT reports do not verify refresh-token behavior or revocation through the client. The
-separate local E2E evidence below covers server-side revocation; it must not be substituted for the
-missing client checks.
+A separate public HTTPS verification completed browser consent, PKCE exchange, refresh-token issuance,
+two refresh rotations and renewed authenticated MCP access. Consent showed **Until you revoke it**;
+the access lifetime remained one hour. Revoking only the verification grant then rejected its bearer
+with `401` and its refresh with `400 invalid_grant`. No coding agents were launched by that check.
 
-### OpenAI Dots probe
-
-Following the Dotty-specific test request, the operator reported successful execution through
-**Paseo Agent Connector — Live Test**. This is user-reported evidence from the operator's OpenAI Dots
-agent ("Dotty"), not a separately rerun controller test.
-
-The reported calls were:
-
-1. `get_connection`: machine `lightning` online, working directory
-   `/home/joe/.local/share/paseo-agent-connector-live/workspace`.
-2. `list_runtimes`: Claude ready and enabled.
-3. `start_agent`: provider `claude`, model `claude-haiku-4-5`, mode `plan`, title `Read live probe`,
-   request key `7be6286d-4bc2-4e15-a713-5ad26b8a749f`; task to read `probe.txt` only, return its exact probe
-   line, and make no file or settings changes.
-4. `get_agent` twice for agent `c9a50aa3-de32-428d-9bf7-2d78d4e1af1b` with limit 20: first `running`,
-   then `idle` with `attentionReason: finished`.
-
-The completed timeline contained one `Read` tool call and no file-write calls. The exact result was
-`PASEO_CONNECTOR_LIVE_PROBE=machine-read-confirmed`.
-
-This demonstrates Dotty's access to the installed remote plugin and the real launch/status/result path.
-It does not independently verify Dotty-specific follow-up, idempotency, cancellation, isolation,
-revocation or refresh behavior. The broader ChatGPT smoke above is distinct evidence, not a substitute
-for those unexercised Dotty-specific checks.
-
-### Stable endpoint cutover (2026-10-05)
-
-With operator approval, the existing live-test Hub was migrated from its temporary Cloudflare quick
-tunnel to `https://paseo.zgenergy.app`. The MCP URL is `https://paseo.zgenergy.app/mcp/paseo`.
-The named Cloudflare Tunnel forwards to the same loopback-only Hub and preserves its embedded database.
-The old quick tunnel was stopped after verification. The Hub and named tunnel are persistent processes
-on the original machine; this is not a claim of reboot recovery or a separate production hosting service.
-
-The isolated daemon's previous Hub relationship was replaced with enrollment at the stable origin.
-Its new daemon ID is `7f51dedf-2f1e-4a78-9c64-86af9a0b88b0`, displayed as `lightning-7f51dedf`.
-CLI status reported it connected with `hub.execute` and no error. The normal user daemon was not migrated.
-
-Controller-observed smoke evidence through the public HTTPS hostname:
-
-- Protected-resource and authorization-server discovery advertise the stable resource and issuer;
-  JWKS is available and unauthenticated MCP requests receive the correct `401` challenge.
-- A fresh dynamically registered public client completed browser consent and authorization-code exchange
-  with PKCE. Authenticated MCP initialization, `get_connection` and `list_runtimes` succeeded.
-- The read-only smoke connection reported the migrated machine online, the same isolated test directory,
-  and Claude ready. It was revoked after the check; its bearer token then received `401 invalid_token`.
-  No agents were launched and no project files were changed by this cutover smoke.
-
-The issuer/resource change requires ChatGPT and Dotty to link again at the new URL. The earlier
-user-reported lifecycle tests remain evidence for the previous endpoint, not proof of a hosted-client
-relink at this one. A new connection does not inherit agents owned by an earlier connection.
-Hosted-client relinking and refresh remain unverified. PR integration, CI and dependency-security
-release gates are unchanged.
-
-### Persistent-access repair (2026-10-05)
-
-The operator reported `oauth_refresh_token_missing` after a previously working Dotty connection.
-The protected-resource metadata advertised only the three tool scopes, although the authorization
-server supported `offline_access`. A discovery-driven client could therefore authorize successfully
-without receiving a refresh token. Resource discovery now advertises all four supported OAuth scopes;
-authorization still requires explicit consent and does not silently add persistent access.
-
-The regression follows real HTTP discovery, registers and authorizes with those discovered scopes,
-rotates refresh tokens twice, and uses renewed MCP access with the original connection, directory and
-tool permissions. Before the fix it failed on both embedded and PostgreSQL because `refresh_token`
-was absent; afterward all 234 connector tests passed. The full suite passed with 1,611 tests and 29
-skipped, plus 13 script tests. Typecheck, lint, formatting, schema checks and the production build passed.
-Independent security and interoperability reviews found no proven blocker.
-
-After deploying to the stable endpoint, a fresh public OAuth client requested the discovered
-`paseo:read` and `offline_access` scopes. Browser consent showed **Until you revoke it**. Code exchange
-issued a refresh token with the unchanged 3,600-second access lifetime. Two actual refresh exchanges
-rotated refresh tokens, and the renewed bearer successfully read the online machine connection bound
-to `/home/joe/code/zge-workspace` with read-only tool permission. The disposable verification connection
-was then revoked: its refresh returned `400 invalid_grant` and its bearer returned `401`. The browser
-and loopback callback listener were closed; no coding agents were launched by this check.
-
-This proves the deployed server's discovery-to-refresh path, not ChatGPT/Dotty's token retention or
-overnight automatic renewal. Existing access-only connections need a fresh authorization; recreate
-the client connection if it caches discovery or a registration lacking persistent access. The user's
-existing connection was not revoked. Actual hosted-client refresh remains unverified.
+Server-side refresh is therefore verified. Hosted-client token retention and post-expiry automatic
+renewal remain separate checks. Existing access-only connections need fresh authorization, and clients
+with cached discovery or registrations may need their app connection recreated.
 
 ## Client-specific examples
 
