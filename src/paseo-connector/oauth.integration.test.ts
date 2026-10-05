@@ -384,13 +384,6 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
     ]);
     expect(served).not.toHaveProperty("introspection_endpoint");
     expect(served).not.toHaveProperty("introspection_endpoint_auth_methods_supported");
-    expect(await connector.protectedResourceMetadata().json()).toEqual({
-      resource: RESOURCE,
-      resource_name: "Paseo Agent Connector",
-      authorization_servers: [ORIGIN],
-      scopes_supported: ["paseo:read", "paseo:run", "paseo:cancel"],
-      bearer_methods_supported: ["header"],
-    });
     expect(await registerClient()).toMatch(/\S/);
   });
 

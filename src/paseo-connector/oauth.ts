@@ -302,7 +302,7 @@ export function protectedResourceMetadata(endpoints: ConnectorOAuthEndpoints) {
     resource: endpoints.resource,
     resource_name: CONNECTOR_PRODUCT_NAME,
     authorization_servers: [endpoints.issuer],
-    scopes_supported: [...CONNECTOR_SCOPES],
+    scopes_supported: [...CONNECTOR_OAUTH_SCOPES],
     bearer_methods_supported: ["header"],
   };
 }

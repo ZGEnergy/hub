@@ -75,6 +75,7 @@ const SEVEN_TOOLS = [
 const ProtectedResourceMetadata = z.object({
   resource: z.string(),
   authorization_servers: z.array(z.string()).min(1),
+  scopes_supported: z.array(z.string()),
 });
 const AuthorizationServerMetadata = z.object({
   authorization_endpoint: z.string(),
@@ -226,7 +227,11 @@ describe.each(["embedded", "postgres"] as const)(
           await fetch(`${resource.authorization_servers[0]}/.well-known/oauth-authorization-server`)
         ).json(),
       );
-      return { resource: resource.resource, ...server };
+      return {
+        resource: resource.resource,
+        scopes_supported: resource.scopes_supported,
+        ...server,
+      };
     }
     type Discovered = Awaited<ReturnType<typeof discover>>;
 
@@ -292,12 +297,13 @@ describe.each(["embedded", "postgres"] as const)(
       user: Operator,
       client: RegisteredClient,
       redirectUri = client.redirectUri,
+      scope = SCOPES,
     ) {
       const {
         location: connect,
         verifier,
         state,
-      } = await requestAuthorization(user, client, redirectUri);
+      } = await requestAuthorization(user, client, redirectUri, scope);
       expect(connect.pathname).toBe("/oauth/connect");
 
       const connector = auth.connector!;
@@ -535,6 +541,45 @@ describe.each(["embedded", "postgres"] as const)(
       } finally {
         await a.close();
         await b.close();
+      }
+    });
+
+    it("keeps discovery-driven clients connected through refresh token rotation", async () => {
+      const user = await operator();
+      const discovered = await discover();
+      const scope = discovered.scopes_supported.join(" ");
+      const client = await register(discovered, HOSTED_CLIENT, scope);
+      const exchanged = await exchange(
+        client,
+        await authorize(user, client, client.redirectUri, scope),
+      );
+      expect(exchanged.status).toBe(200);
+      const issued = Tokens.parse(await exchanged.json());
+
+      const refreshed = await token(client, {
+        grant_type: "refresh_token",
+        refresh_token: issued.refresh_token,
+      });
+      expect(refreshed.status).toBe(200);
+      const rotated = Tokens.parse(await refreshed.json());
+      expect(rotated.refresh_token).not.toBe(issued.refresh_token);
+
+      const refreshedAgain = await token(client, {
+        grant_type: "refresh_token",
+        refresh_token: rotated.refresh_token,
+      });
+      expect(refreshedAgain.status).toBe(200);
+      const renewed = Tokens.parse(await refreshedAgain.json());
+      expect(renewed.refresh_token).not.toBe(rotated.refresh_token);
+      const mcp = await connectMcp(`${origin}/mcp/paseo`, renewed.access_token);
+      try {
+        expect((await callTool(mcp, "get_connection")).structured).toMatchObject({
+          connectionId: connectionOf(issued.access_token),
+          workingDirectory: WORKING_DIRECTORY,
+          scopes: ["paseo:read", "paseo:run", "paseo:cancel"],
+        });
+      } finally {
+        await mcp.close();
       }
     });
 

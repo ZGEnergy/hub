@@ -62,8 +62,10 @@ With `<origin>` standing for `PASEO_HUB_APP_URL`:
 
 The protected-resource metadata names the resource `<origin>/mcp/paseo`, the display name
 `Paseo Agent Connector`, the one authorization server `<origin>`, the scopes `paseo:read`,
-`paseo:run` and `paseo:cancel`, and header-only bearer tokens. It is served only at the path-suffixed URL above; the root
-`/.well-known/oauth-protected-resource` is not served, and neither is `/.well-known/openid-configuration`.
+`paseo:run`, `paseo:cancel` and `offline_access`, and header-only bearer tokens. Advertising persistent
+access here lets clients derive refresh-capable authorization from resource discovery. It is served only
+at the path-suffixed URL above; the root `/.well-known/oauth-protected-resource` is not served, and
+neither is `/.well-known/openid-configuration`.
 
 The authorization-server metadata lists only the endpoints in the table above (the library's introspection
 endpoint is not served and not advertised), `scopes_supported` of `paseo:read`, `paseo:run`, `paseo:cancel`
@@ -92,6 +94,9 @@ them cannot link.
   secret), whatever method it asks for. A registration that asks for the `client_credentials` grant, omits
   redirect URIs, or sets `require_pkce` to false is refused. A successful registration answers `201` with
   `Cache-Control: no-store`. A registration without `scope` gets all four scopes.
+- **Refresh-capable registration.** Register both `authorization_code` and `refresh_token` in `grant_types`
+  for persistent access. The authorization request must also include `offline_access`; neither condition
+  alone is enough to receive a refresh token.
 - **Authorization code with PKCE `S256`.** `plain` and missing challenges are refused.
 - **Redirect URIs.** `https:` URIs; `http:` only on loopback hosts (`127.0.0.0/8`, `[::1]`, `localhost`,
   `*.localhost`); and custom schemes such as `myapp://callback`. `javascript:`, `data:` and `vbscript:`
@@ -166,7 +171,8 @@ The same steps apply to every client. Client-specific notes are under
    `<origin>/.well-known/oauth-protected-resource/mcp/paseo` returns JSON.
 2. Add `<origin>/mcp/paseo` to the client as a remote MCP server with OAuth.
 3. The client calls the endpoint, gets the `401` challenge, reads both metadata documents and registers
-   itself.
+   itself. For persistent access, its registration allows `authorization_code` and `refresh_token`, and its
+   authorization requests `offline_access` alongside the connector permissions it needs.
 4. The client opens Hub's authorization page in a browser. A signed-out user sees Hub's normal sign-in form
    at `/oauth/connect`.
 5. The user picks an enrolled machine from an organization where they are an owner or admin, then types an
@@ -176,6 +182,23 @@ The same steps apply to every client. Client-specific notes are under
    verified by Hub; "No name given" when it sent none), where it will return to, the machine, the directory and the scopes. Approving activates
    the connection. Denying discards it; the client must start again.
 7. The client exchanges the code and calls the tools.
+
+For full agent access that survives access-token expiry, the OAuth scope string is:
+
+```text
+paseo:read paseo:run paseo:cancel offline_access
+```
+
+The consent page must say access lasts until revoked, not only until the current access token expires.
+After code exchange, the client must retain the refresh token, use the newest token returned on each
+refresh, and continue sending the refreshed access token to MCP. `get_connection` reports the three
+connector permissions, not `offline_access`, which is an OAuth renewal scope rather than a tool permission.
+
+A client reporting `oauth_refresh_token_missing` cannot renew access: its original authorization may
+have omitted `offline_access`, its registration may have omitted the refresh grant, or it may not have
+retained the returned refresh token. Correct that setup and start a fresh authorization. Refresh tokens
+cannot be added retroactively to an existing access-only grant. If the client caches discovery or its
+registration, recreate the app connection so it registers and authorizes with persistent access.
 
 Every MCP request checks the connection again. It must still be active and not revoked, the user must still
 be an owner or admin of the organization, and the machine must still be active with `hub.execute`.
@@ -432,6 +455,34 @@ user-reported lifecycle tests remain evidence for the previous endpoint, not pro
 relink at this one. A new connection does not inherit agents owned by an earlier connection.
 Hosted-client relinking and refresh remain unverified. PR integration, CI and dependency-security
 release gates are unchanged.
+
+### Persistent-access repair (2026-10-05)
+
+The operator reported `oauth_refresh_token_missing` after a previously working Dotty connection.
+The protected-resource metadata advertised only the three tool scopes, although the authorization
+server supported `offline_access`. A discovery-driven client could therefore authorize successfully
+without receiving a refresh token. Resource discovery now advertises all four supported OAuth scopes;
+authorization still requires explicit consent and does not silently add persistent access.
+
+The regression follows real HTTP discovery, registers and authorizes with those discovered scopes,
+rotates refresh tokens twice, and uses renewed MCP access with the original connection, directory and
+tool permissions. Before the fix it failed on both embedded and PostgreSQL because `refresh_token`
+was absent; afterward all 234 connector tests passed. The full suite passed with 1,611 tests and 29
+skipped, plus 13 script tests. Typecheck, lint, formatting, schema checks and the production build passed.
+Independent security and interoperability reviews found no proven blocker.
+
+After deploying to the stable endpoint, a fresh public OAuth client requested the discovered
+`paseo:read` and `offline_access` scopes. Browser consent showed **Until you revoke it**. Code exchange
+issued a refresh token with the unchanged 3,600-second access lifetime. Two actual refresh exchanges
+rotated refresh tokens, and the renewed bearer successfully read the online machine connection bound
+to `/home/joe/code/zge-workspace` with read-only tool permission. The disposable verification connection
+was then revoked: its refresh returned `400 invalid_grant` and its bearer returned `401`. The browser
+and loopback callback listener were closed; no coding agents were launched by this check.
+
+This proves the deployed server's discovery-to-refresh path, not ChatGPT/Dotty's token retention or
+overnight automatic renewal. Existing access-only connections need a fresh authorization; recreate
+the client connection if it caches discovery or a registration lacking persistent access. The user's
+existing connection was not revoked. Actual hosted-client refresh remains unverified.
 
 ## Client-specific examples
 
