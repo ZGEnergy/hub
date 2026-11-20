@@ -476,7 +476,7 @@ function ConsentSummary({ summary }: { summary: ConnectorConsentSummary }) {
 
 const CONNECTION_COLUMNS = [
   { header: "App" },
-  { header: "Machine" },
+  { header: "Machine", fill: true },
   { header: "Permissions" },
   { header: "Connected" },
   { header: "Status" },
@@ -595,7 +595,7 @@ function ConnectionRow({
         />
       </DataCell>
       <DataCell>
-        <TwoLine primary={machine} secondary={record.workingDirectory} mono />
+        <TwoLine primary={machine} secondary={record.workingDirectory} path />
       </DataCell>
       <DataCell muted>{record.scopes.map((scope) => SCOPES[scope].label).join(", ")}</DataCell>
       <DataCell muted>
@@ -608,7 +608,7 @@ function ConnectionRow({
           <StatusPill tone="neutral">Revoked</StatusPill>
         )}
       </DataCell>
-      <DataCell align="end">
+      <DataCell>
         {record.revokedAt === null ? (
           <RowActions label={`Actions for ${app} on ${machine} ${record.workingDirectory}`}>
             <ConfirmMenuItem

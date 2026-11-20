@@ -22,7 +22,7 @@ test("keeps every daily surface at organization scope", async ({ hub, page }) =>
     "Triggers",
     "Activity",
     "Daemons",
-    "Connections",
+    "Integrations",
     "Settings",
   ]);
   await expect(page.getByRole("navigation", { name: "Project", exact: true })).toHaveCount(0);
@@ -105,7 +105,7 @@ test.describe("instance scope", () => {
       await app.navigation.expectBreadcrumb("Instance", "Operator");
       // Shoot the loaded page, not its skeletons: the organization picker is the panel's own
       // proof that its data arrived.
-      await expect(page.getByRole("combobox", { name: "Manage organization" })).toBeVisible();
+      await expect(page.getByRole("combobox", { name: "Organization", exact: true })).toBeVisible();
       await page.screenshot({ path: `${SHOTS}/07-instance-scope.png`, fullPage: true });
     });
 

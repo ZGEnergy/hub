@@ -1,6 +1,7 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 import { DaemonHandoffSurface } from "./daemon-handoff.js";
+import { GitHubConnectFlow, type GitHubAccountChoice } from "./github.js";
 
 export type AppProvider = "GitHub" | "Slack" | "Discord" | "Linear";
 
@@ -205,6 +206,27 @@ export class AppSection {
     return this.body().getByRole("button", { name, exact: true });
   }
 
+  /** Presses Connect GitHub and connects one account across GitHub's pages and Hub's chooser. */
+  async connectGitHub(account = "acme-inc"): Promise<void> {
+    const github = new GitHubConnectFlow(this.page);
+    await this.action("Connect GitHub").click();
+    await github.connect(account);
+  }
+
+  /** Presses Connect GitHub and connects an account that already has the App, from the chooser. */
+  async connectFromGitHubChooser(
+    account: string,
+    choices: readonly GitHubAccountChoice[],
+  ): Promise<void> {
+    const github = new GitHubConnectFlow(this.page);
+    await this.action("Connect GitHub").click();
+    await github.authorizeWhenAsked();
+    await github.expectChooser(choices);
+    await github.choose(account);
+    await expect(this.page).not.toHaveURL((url) => url.pathname.startsWith("/integrations"));
+    github.expectInstallPageNotVisited();
+  }
+
   async save(): Promise<void> {
     await this.body()
       .getByRole("button", {
@@ -320,11 +342,10 @@ export class AppSection {
    */
   async permissionMapping(): Promise<Readonly<Record<string, string>>> {
     return await this.steps()
-      .locator("dl")
-      .first()
-      .evaluate((list) => {
+      .locator('dl[data-summary$=" permissions"]')
+      .evaluateAll((lists) => {
         const pairs: Record<string, string> = {};
-        const terms = [...list.querySelectorAll("dt")];
+        const terms = lists.flatMap((list) => [...list.querySelectorAll("dt")]);
         for (const term of terms) {
           const definition = term.nextElementSibling;
           if (definition?.tagName.toLowerCase() !== "dd") continue;

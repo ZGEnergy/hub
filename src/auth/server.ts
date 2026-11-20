@@ -76,7 +76,12 @@ export interface AuthServer {
   handle(request: Request): Promise<Response>;
   browserAccount?(request: Request): Promise<Response>;
   signInEmail?(
-    data: { email: string; password: string; oauthQuery?: string | undefined },
+    data: {
+      email: string;
+      password: string;
+      oauthQuery?: string | undefined;
+      invitation?: string | undefined;
+    },
     headers: Headers,
   ): Promise<AccountAuthentication>;
   signUpEmail?(
@@ -260,6 +265,7 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
       : {
           emailVerification: {
             autoSignInAfterVerification: true,
+            sendOnSignIn: true,
             sendVerificationEmail: (email: Parameters<AccountMailer["sendVerificationEmail"]>[0]) =>
               accountMailer.sendVerificationEmail(email),
           },
@@ -384,9 +390,11 @@ export function createAuthServer(options: AuthServerOptions): AuthServer {
     },
     async signInEmail(data, headers) {
       requireBrowserOrigin(headers, headersBrowserOrigin(headers, browserOrigin));
-      const { oauthQuery, ...credentials } = data;
+      const { oauthQuery, invitation, ...credentials } = data;
       const body = {
         ...credentials,
+        // An unverified sign-in is sent a verification email; it returns to the same place.
+        callbackURL: signupCallback(oauthQuery, invitation),
         ...(oauthQuery === undefined ? {} : { oauth_query: oauthQuery }),
       };
       const result = await auth.api.signInEmail({

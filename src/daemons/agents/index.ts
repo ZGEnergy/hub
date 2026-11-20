@@ -19,7 +19,7 @@ const SnapshotSchema = z.object({
 });
 export type AgentSnapshot = z.infer<typeof SnapshotSchema>;
 export type AgentEvent =
-  | { type: "agent_update"; agent: AgentSnapshot; timestamp: string }
+  | { type: "agent_update" | "agent_snapshot"; agent: AgentSnapshot; timestamp: string }
   | { type: "agent_stream"; agentId: string; event: DaemonAgentStreamEvent; timestamp: string };
 
 /** Position in an agent's timeline; the epoch changes when the daemon rewrites that timeline. */
@@ -105,6 +105,23 @@ export function isDaemonOutcomeUnknown(error: unknown): boolean {
   );
 }
 
+class DaemonAgentCreateError extends DaemonAgentError {
+  constructor(
+    message: string,
+    private readonly code: unknown,
+  ) {
+    super(message);
+  }
+
+  isToolPolicyUnsupported(provider: string): boolean {
+    if (this.code === "tool_policy_unsupported") return true;
+    if (this.code !== "unknown" && this.code !== undefined) return false;
+    // Released daemons flatten provider errors to "unknown" on the create status response.
+    const message = `Provider '${provider}' cannot preapprove exact MCP tools for unattended execution`;
+    return this.message === message || this.message.startsWith(`${message}; `);
+  }
+}
+
 /** The ordinary daemon protocol. This channel knows nothing about Hub executions or triggers. */
 export class DaemonAgents implements AgentConnection {
   private supported = false;
@@ -134,7 +151,14 @@ export class DaemonAgents implements AgentConnection {
     const requestId = payload["requestId"];
     const pending = typeof requestId === "string" ? this.pending.get(requestId) : undefined;
     if (pending) {
-      if (type === "rpc_error" || payload["status"] === "agent_create_failed") {
+      if (type === "status" && payload["status"] === "agent_create_failed") {
+        pending.reject(
+          new DaemonAgentCreateError(
+            z.string().catch("Daemon request rejected").parse(payload["error"]),
+            payload["errorCode"],
+          ),
+        );
+      } else if (type === "rpc_error") {
         pending.reject(
           new DaemonAgentError(z.string().catch("Daemon request rejected").parse(payload["error"])),
         );
@@ -177,26 +201,39 @@ export class DaemonAgents implements AgentConnection {
     options: DaemonCreateAgentOptions,
     timeoutMs?: number,
   ): Promise<AgentSnapshot> {
-    const response = await this.request(
-      {
-        type: "create_agent_request",
-        idempotencyKey: key,
-        config: {
-          provider: options.provider,
-          title: options.title,
-          cwd: options.cwd,
-          model: options.model,
-          modeId: options.mode,
-          thinkingOptionId: options.thinkingOptionId,
-          providerOptions: options.providerOptions,
-          mcpServers: options.mcpServers,
-          toolPolicy: options.toolPolicy,
-        },
-        env: options.env,
-        worktree: options.worktree,
-      },
-      timeoutMs,
-    );
+    const { toolPolicy } = options;
+    const config = {
+      provider: options.provider,
+      title: options.title,
+      cwd: options.cwd,
+      model: options.model,
+      modeId: options.mode,
+      thinkingOptionId: options.thinkingOptionId,
+      providerOptions: options.providerOptions,
+      mcpServers: options.mcpServers,
+    };
+    const request = {
+      type: "create_agent_request",
+      idempotencyKey: key,
+      config: { ...config, toolPolicy },
+      env: options.env,
+      worktree: options.worktree,
+      background: options.background,
+    };
+    const response = await this.request(request, timeoutMs).catch((error: unknown) => {
+      if (
+        toolPolicy === undefined ||
+        !(error instanceof DaemonAgentCreateError) ||
+        !error.isToolPolicyUnsupported(config.provider)
+      ) {
+        throw error;
+      }
+      // The daemon fingerprints the configuration even when creation failed before agent startup.
+      return this.request(
+        { ...request, idempotencyKey: `${key}:without-tool-policy`, config },
+        timeoutMs,
+      );
+    });
     const agent = SnapshotSchema.parse(response["agent"]);
     if (options.workspaceTitle !== undefined)
       await this.titleWorkspace(agent.workspaceId, options.workspaceTitle);
@@ -266,6 +303,7 @@ export class DaemonAgents implements AgentConnection {
       if (!this.observing) {
         await this.request({
           type: "fetch_agents_request",
+          includeBackground: true,
           subscribe: { subscriptionId: "hub-continuation" },
         });
         this.observing = true;
@@ -274,6 +312,21 @@ export class DaemonAgents implements AgentConnection {
         type: "agent.timeline.set_subscription.request",
         agentIds: [...this.listeners.keys()],
       });
+      // Subscribe before reading so a state change after the snapshot is still observed.
+      // Fetch individually: the directory is paginated and later watches share its subscription.
+      try {
+        const response = await this.request({ type: "fetch_agent_request", agentId });
+        const agent = SnapshotSchema.safeParse(response["agent"]);
+        if (agent.success && agent.data.id === agentId)
+          listener({
+            type: "agent_snapshot",
+            agent: agent.data,
+            timestamp: this.now().toISOString(),
+          });
+      } catch (error) {
+        // Snapshot reads are best effort; older daemons keep their live subscription usable.
+        this.reportFailure(error, "daemon.agent.watch.snapshot");
+      }
     } catch (error) {
       listeners.delete(listener);
       throw error;

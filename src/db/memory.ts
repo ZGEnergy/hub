@@ -45,11 +45,12 @@ import type {
   AcceptLinearEventInput,
   AcceptSlackEventInput,
   DurableProviderEvent,
-  GitHubLifecycleReceiptClaim,
+  GitHubInstallationSyncOwner,
+  GitHubInstallationSyncClaim,
   GitHubLifecycleReceiptClaimInput,
   AttachmentProvider,
   AttachmentRecord,
-  GitHubLifecycleResult,
+  GitHubInstallationSyncResult,
   PersistManualEventInput,
   ProviderEventAcceptance,
   CreateProjectInput,
@@ -64,6 +65,7 @@ import type {
   SlackConnectionRecord,
   LinearConnectionRecord,
   GitHubRepositoryRecord,
+  GitHubRepositorySnapshot,
   OrganizationConnectionUsage,
   OrganizationRunRecord,
   UnroutedProviderEventCount,
@@ -88,6 +90,7 @@ import type {
   ProjectActivityRunListRecord,
   OrganizationEntitlementsRecord,
   OperatorOrganizationRecord,
+  OperatorMemberRecord,
   StampOrganizationEntitlementsInput,
   OverrideOrganizationEntitlementsInput,
   ClearOrganizationEntitlementsOverrideInput,
@@ -161,6 +164,21 @@ class MemoryDatabase implements Database {
   readonly connector: import("../paseo-connector/contracts.js").ConnectorStore =
     new MemoryConnectorStore();
   // This test double has no background work. Scheduling tests use the actual embedded/PG runtime.
+  readonly webhooks: import("../triggers/webhook/index.js").WebhookStore = {
+    async list() {
+      return [];
+    },
+    async rotate() {
+      return undefined;
+    },
+    async authenticate() {
+      return undefined;
+    },
+    async accept() {
+      return { status: "unauthorized" };
+    },
+  };
+
   get schedules(): import("../triggers/schedule/index.js").ScheduleStore {
     return (
       this.options.schedules ?? {
@@ -1153,45 +1171,113 @@ class MemoryDatabase implements Database {
     };
   }
 
-  async claimGitHubLifecycleReceipt(
-    input: GitHubLifecycleReceiptClaimInput,
-  ): Promise<GitHubLifecycleReceiptClaim> {
-    const connection = await this.findGitHubConnection(input.installationId);
-    if (connection === undefined) {
-      return { status: "duplicate", providerEventReceiptId: input.deliveryId };
+  private readonly githubInstallationSyncs = new Map<
+    string,
+    GitHubLifecycleReceiptClaimInput & { connectionId: string | null; retryAt: number | null }
+  >();
+  private readonly githubSyncs = new Map<number, Promise<unknown>>();
+
+  async synchronizeGitHubInstallation<T>(
+    installationId: number,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.githubSyncs.get(installationId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(operation);
+    this.githubSyncs.set(installationId, next);
+    try {
+      return await next;
+    } finally {
+      if (this.githubSyncs.get(installationId) === next) this.githubSyncs.delete(installationId);
     }
-    const existing = this.findReceiptId(
-      connection.organizationId,
-      input.deliveryId,
-      input.signatureHash,
-    );
-    if (existing !== undefined) {
-      return { status: "duplicate", providerEventReceiptId: existing };
-    }
-    const receipt = this.insertProviderEventReceipt({
-      organizationId: connection.organizationId,
-      provider: "github",
-      connectionId: connection.id,
-      resourceId: null,
-      input: { ...input, dropReason: "github_lifecycle" },
-    });
-    return {
-      status: "claimed",
-      providerEventReceiptId: receipt.id,
-      installationId: input.installationId,
-    };
   }
 
-  async applyGitHubLifecycle(
-    claim: Extract<GitHubLifecycleReceiptClaim, { status: "claimed" }>,
-    result: GitHubLifecycleResult,
+  pendingGitHubInstallationSyncs(owner: GitHubInstallationSyncOwner) {
+    return Promise.resolve(
+      [...this.githubInstallationSyncs.entries()]
+        .filter(
+          ([, receipt]) =>
+            receipt.providerApplicationId === owner.providerApplicationId &&
+            receipt.retryAt !== null &&
+            receipt.retryAt <= Date.now() &&
+            (receipt.connectionId !== null || this.githubConnections.has(receipt.installationId)),
+        )
+        .map(([id, receipt]) => ({
+          status: "claimed" as const,
+          installationSyncId: id,
+          installationId: receipt.installationId,
+          removeBinding: receipt.source === "github.installation",
+        })),
+    );
+  }
+
+  async claimGitHubLifecycleReceipt(
+    input: GitHubLifecycleReceiptClaimInput,
+  ): Promise<GitHubInstallationSyncClaim> {
+    const existing = [...this.githubInstallationSyncs.entries()].find(
+      ([, receipt]) =>
+        receipt.deliveryId === input.deliveryId || receipt.signatureHash === input.signatureHash,
+    );
+    if (existing !== undefined) return { status: "duplicate", installationSyncId: existing[0] };
+    const connection = await this.findGitHubConnection(input.installationId);
+    const id = randomUUID();
+    this.githubInstallationSyncs.set(id, {
+      ...input,
+      connectionId: connection?.id ?? null,
+      retryAt: Date.now(),
+    });
+    if (connection !== undefined)
+      this.insertProviderEventReceipt({
+        organizationId: connection.organizationId,
+        provider: "github",
+        connectionId: connection.id,
+        resourceId: null,
+        input: { ...input, dropReason: "github_lifecycle" },
+      });
+    return { status: "claimed", installationSyncId: id, installationId: input.installationId };
+  }
+
+  async applyGitHubInstallationSync(
+    owner: GitHubInstallationSyncOwner,
+    claim: Extract<GitHubInstallationSyncClaim, { status: "claimed" }>,
+    result: GitHubInstallationSyncResult,
   ): Promise<void> {
-    const evidence = this.providerEventReceipts.get(claim.providerEventReceiptId);
-    if (evidence?.droppedReason !== "github_lifecycle") return;
-    if (result.status !== "absent" || !result.removeBinding) return;
+    const receipt = this.githubInstallationSyncs.get(claim.installationSyncId);
+    if (
+      receipt === undefined ||
+      receipt.retryAt === null ||
+      receipt.providerApplicationId !== owner.providerApplicationId
+    )
+      return;
     const connection = this.githubConnections.get(claim.installationId);
-    if (connection === undefined) return;
+    if (connection === undefined && receipt.connectionId === null) return;
+    receipt.retryAt = null;
+    if (
+      connection === undefined ||
+      (receipt.connectionId !== null && receipt.connectionId !== connection.id)
+    )
+      return;
+    receipt.connectionId = connection.id;
+    if (
+      this.findReceiptId(connection.organizationId, receipt.deliveryId, receipt.signatureHash) ===
+      undefined
+    )
+      this.insertProviderEventReceipt({
+        organizationId: connection.organizationId,
+        provider: "github",
+        connectionId: connection.id,
+        resourceId: null,
+        input: { ...receipt, dropReason: "github_lifecycle" },
+      });
+    if (result.status === "present") {
+      this.githubConnections.set(claim.installationId, { ...connection, ...result.identity });
+      await this.replaceGitHubRepositorySnapshot(connection, result.repositories);
+      return;
+    }
+    if (!result.removeBinding) return;
     this.githubConnections.delete(claim.installationId);
+    for (const [key, repository] of this.githubRepositories) {
+      if (repository.connectionId === connection.id) this.githubRepositories.delete(key);
+    }
     for (const [projectId, source] of this.githubConfigurationSources) {
       if (source.githubConnectionId !== connection.id) continue;
       this.configurationAuthorities.set(projectId, "manual");
@@ -1215,15 +1301,26 @@ class MemoryDatabase implements Database {
     }
   }
 
-  releaseGitHubLifecycleReceipt(providerEventReceiptId: string): Promise<void> {
-    const receipt = this.providerEventReceipts.get(providerEventReceiptId);
-    if (receipt?.droppedReason !== "github_lifecycle") return Promise.resolve();
-    this.providerEventReceipts.delete(providerEventReceiptId);
-    this.providerEventReceiptIdsByDelivery.delete(
-      triggerDeliveryKey(receipt.organizationId, receipt.deliveryId),
-    );
-    if (receipt.signatureHash !== null)
-      this.providerEventReceiptIdsBySignature.delete(receipt.signatureHash);
+  private async replaceGitHubRepositorySnapshot(
+    connection: GitHubConnectionRecord,
+    repositories: GitHubRepositorySnapshot,
+  ): Promise<void> {
+    for (const [key, repository] of this.githubRepositories) {
+      if (
+        repository.connectionId === connection.id &&
+        !repositories.some((item) => item.repositoryId === repository.repositoryId)
+      )
+        this.githubRepositories.delete(key);
+    }
+    await this.upsertGitHubRepositories(connection.organizationId, connection.id, repositories);
+  }
+
+  retryGitHubInstallationSync(
+    _owner: GitHubInstallationSyncOwner,
+    installationSyncId: string,
+  ): Promise<void> {
+    const receipt = this.githubInstallationSyncs.get(installationSyncId);
+    if (receipt !== undefined && receipt.retryAt !== null) receipt.retryAt = Date.now() + 30_000;
     return Promise.resolve();
   }
 
@@ -2704,6 +2801,24 @@ class MemoryDatabase implements Database {
     return this.operatorOrganizations().find((organization) => organization.slug === slug);
   }
 
+  /** The in-memory store keeps no user records, so a fixture membership's user id stands in for
+   * the member's name and email. */
+  async listOrganizationMembersForOperator(
+    organizationId: string,
+  ): Promise<OperatorMemberRecord[]> {
+    const joinedAt = this.options.now?.() ?? new Date();
+    return (this.options.memberships ?? [])
+      .filter((membership) => membership.organizationId === organizationId)
+      .map((membership) => ({
+        id: membership.membershipId,
+        userId: membership.userId,
+        name: membership.userId,
+        email: membership.userId,
+        role: membership.role,
+        joinedAt,
+      }));
+  }
+
   async findOrganizationSlugById(organizationId: string): Promise<string | undefined> {
     return this.operatorOrganizations().find((organization) => organization.id === organizationId)
       ?.slug;
@@ -2713,11 +2828,13 @@ class MemoryDatabase implements Database {
    * organizations only through those, so the operator picker reads the same source. */
   private operatorOrganizations(): OperatorOrganizationRecord[] {
     const seen = new Map<string, OperatorOrganizationRecord>();
+    const createdAt = this.options.now?.() ?? new Date();
     for (const membership of this.options.memberships ?? []) {
       seen.set(membership.organizationId, {
         id: membership.organizationId,
         name: membership.organizationName,
         slug: membership.organizationSlug,
+        createdAt,
       });
     }
     return Array.from(seen.values()).sort((left, right) => left.name.localeCompare(right.name));
@@ -2983,7 +3100,7 @@ class MemoryDatabase implements Database {
     return rows[0];
   }
 
-  async upsertGitHubRepositories(
+  private async upsertGitHubRepositories(
     organizationId: string,
     connectionId: string,
     repositories: Array<
@@ -3110,10 +3227,13 @@ class MemoryDatabase implements Database {
           step?.agentExecutionId == null
             ? undefined
             : this.agentExecutions.get(step.agentExecutionId);
+        const trigger = Array.from(this.organizationTriggers.values()).find(
+          ({ runtimeProjectId }) => runtimeProjectId === run.projectId,
+        );
         return [
           {
             id: run.id,
-            triggerName: run.configuredTriggerName,
+            triggerName: trigger?.name ?? run.configuredTriggerName,
             provider: receipt.provider,
             source: receipt.source,
             status: run.status,

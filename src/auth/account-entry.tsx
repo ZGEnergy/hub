@@ -162,6 +162,7 @@ function AccountAuthenticationEntry({
           data: {
             email,
             password,
+            ...(account.invitation === undefined ? {} : { invitation: account.invitation.id }),
             ...(oauthRequest === undefined ? {} : { oauthQuery: oauthRequest.query }),
           },
         });

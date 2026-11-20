@@ -20,6 +20,7 @@ const credentialsSchema = z.object({
   password: z.string().min(PASSWORD_MIN_LENGTH),
 });
 const authenticationSchema = credentialsSchema.extend({ oauthQuery: z.string().min(1).optional() });
+const signInSchema = authenticationSchema.extend({ invitation: z.string().min(1).optional() });
 const signUpSchema = authenticationSchema.extend({
   name: z.string().trim().min(1),
   invitation: z.string().min(1).optional(),
@@ -110,7 +111,7 @@ export const accountState = createServerFn({ method: "GET" })
   });
 
 export const signIn = createServerFn({ method: "POST" })
-  .validator(authenticationSchema)
+  .validator(signInSchema)
   .handler(async ({ data }): Promise<Result<AccountAuthentication>> => {
     try {
       const application = await getApplication();

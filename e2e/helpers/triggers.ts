@@ -1,5 +1,6 @@
 import { parseDocument } from "yaml";
 import { expect, type Page } from "@playwright/test";
+import { allowClipboard } from "./apps.js";
 import type { BuiltApplication } from "./hub.js";
 
 export class OrganizationTriggers {
@@ -128,20 +129,9 @@ export class OrganizationTriggers {
       "data-value",
       "",
     );
-    await expect(this.page.getByRole("combobox", { name: "Execution mode" })).toHaveAttribute(
-      "data-value",
-      "",
-    );
+    await expect(this.page.getByRole("combobox", { name: "Execution mode" })).toBeHidden();
     await this.page.getByLabel("Working directory").fill(input.cwd);
     await this.selectAgent(input.agent);
-    await expect(this.page.getByRole("combobox", { name: "Execution mode" })).toHaveAttribute(
-      "data-value",
-      "",
-    );
-    await expect(this.page.getByRole("combobox", { name: "Thinking" })).toHaveAttribute(
-      "data-value",
-      "",
-    );
     await this.selectOption("Execution mode", input.mode);
     await this.selectOption("Thinking", input.thinking);
     await this.page.getByRole("button", { name: "Advanced provider options" }).click();
@@ -149,13 +139,40 @@ export class OrganizationTriggers {
     await this.page.getByLabel("Instructions", { exact: true }).fill(input.prompt);
   }
 
+  async expectReportedModelChoices(cwd: string, labels: string[]) {
+    await this.page.getByLabel("Working directory").fill(cwd);
+    const picker = this.page.getByRole("combobox", { name: "Agent", exact: true });
+    await picker.scrollIntoViewIfNeeded();
+    await picker.click();
+    await expect(this.page.getByRole("option")).toHaveCount(labels.length);
+    for (const label of labels)
+      await expect(this.page.getByRole("option").filter({ hasText: label })).toBeVisible();
+    await this.page.keyboard.press("Escape");
+  }
+
+  async expectNoExecutionModes() {
+    await expect(this.page.getByRole("combobox", { name: "Execution mode" })).toHaveCount(0);
+  }
+
+  async expectMaterializedSelections(mode: string, thinking: string) {
+    await expect(this.page.getByRole("combobox", { name: "Execution mode" })).toHaveAttribute(
+      "data-value",
+      mode,
+    );
+    await expect(this.page.getByRole("combobox", { name: "Thinking" })).toHaveAttribute(
+      "data-value",
+      thinking,
+    );
+  }
+
   async configureManual(input: {
     name: string;
     daemon: string;
     cwd: string;
     agent: string;
-    mode: string;
-    thinking: string;
+    mode?: string;
+    thinking?: string;
+    providerOptions?: string;
     prompt: string;
   }) {
     await this.page.getByLabel("Trigger name").fill(input.name);
@@ -163,9 +180,73 @@ export class OrganizationTriggers {
     await this.selectOption("Run on daemon", input.daemon);
     await this.page.getByLabel("Working directory").fill(input.cwd);
     await this.selectAgent(input.agent);
-    await this.selectOption("Execution mode", input.mode);
-    await this.selectOption("Thinking", input.thinking);
+    if (input.mode !== undefined) await this.selectOption("Execution mode", input.mode);
+    if (input.thinking !== undefined) await this.selectOption("Thinking", input.thinking);
+    if (input.providerOptions !== undefined) {
+      await this.page.getByRole("button", { name: "Advanced provider options" }).click();
+      await this.page.getByLabel("Provider options (JSON)").fill(input.providerOptions);
+    }
     await this.page.getByLabel("Instructions", { exact: true }).fill(input.prompt);
+  }
+
+  async configureWebhook(daemon: string) {
+    await this.configureManual({
+      name: "webhook-alert",
+      daemon,
+      cwd: "/workspace/acme",
+      agent: "opencode/gateway/vendor/model-v1",
+      mode: "full-access",
+      thinking: "low",
+      prompt: "Summarize the alert.",
+    });
+    await this.selectOption("When this happens", "webhook.received");
+  }
+
+  async addScheduleBeforeWebhook() {
+    await this.switchToYaml();
+    const document = parseDocument(await this.yamlEditor().innerText(), { compat: ["timestamp"] });
+    document.set("on", {
+      "schedule.tick": {
+        recurrence: { start: "2099-01-01T09:00:00", rule: "FREQ=DAILY", timezone: "UTC" },
+      },
+      "webhook.received": {},
+    });
+    await this.replaceYaml(document.toString({ lineWidth: 0 }));
+  }
+
+  async expectWebhookEndpoint() {
+    await expect(this.page.getByRole("heading", { name: "Webhook endpoint" })).toBeVisible();
+    const url = this.page.getByText(/https?:\/\/[^ ]+\/webhooks\/wh_[\w-]{32}$/u);
+    await expect(url).toBeVisible();
+    await expect(this.page.getByRole("button", { name: "Copy curl example" })).toBeVisible();
+    return url.innerText();
+  }
+
+  async copyWebhookConnectionDetails(endpoint: string) {
+    await allowClipboard(this.page, new URL(this.page.url()).origin);
+    await this.page.getByRole("button", { name: "Copy Webhook URL" }).click();
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()))
+      .toBe(endpoint);
+    await this.page.getByRole("button", { name: "Copy curl example" }).click();
+    await expect
+      .poll(() => this.page.evaluate(() => navigator.clipboard.readText()))
+      .toContain(`curl -X POST '${endpoint}'`);
+  }
+
+  async issueWebhookSecret(action: "Create secret" | "Rotate secret") {
+    await this.page.getByRole("button", { name: action, exact: true }).click();
+    const secret = this.page.getByRole("textbox", { name: "Webhook secret" });
+    await expect(secret).toHaveValue(/^whsec_[\w-]{43}$/u);
+    return secret.inputValue();
+  }
+
+  async reloadWebhookSettings() {
+    await this.page.reload();
+    await expect(
+      this.page.getByRole("button", { name: "Rotate secret", exact: true }),
+    ).toBeVisible();
+    await expect(this.page.getByRole("textbox", { name: "Webhook secret" })).toBeHidden();
   }
 
   async configureSchedule(daemon: string) {
@@ -193,6 +274,29 @@ export class OrganizationTriggers {
         .getByRole("status")
         .filter({ hasText: "Every day at 08:15 and 16:45 (Europe/Berlin)" }),
     ).toBeVisible();
+  }
+
+  async grantScheduledIntegrationTools() {
+    await this.page.getByRole("button", { name: "Integration tools", exact: true }).click();
+    await this.selectOption("Slack integration", "company-slack");
+    await this.page.getByRole("textbox", { name: "Slack channel IDs" }).fill("CALLOWED");
+    await this.page.getByRole("checkbox", { name: "Post to Slack" }).check();
+    await this.selectOption("Discord integration", "company-discord");
+    await this.page
+      .getByRole("textbox", { name: "Discord channel IDs" })
+      .fill("123456789012345678");
+    await this.page.getByRole("checkbox", { name: "Read from Discord" }).check();
+  }
+
+  async expectScheduledIntegrationTools() {
+    await expect(this.page.getByRole("textbox", { name: "Slack channel IDs" })).toHaveValue(
+      "CALLOWED",
+    );
+    await expect(this.page.getByRole("checkbox", { name: "Post to Slack" })).toBeChecked();
+    await expect(this.page.getByRole("textbox", { name: "Discord channel IDs" })).toHaveValue(
+      "123456789012345678",
+    );
+    await expect(this.page.getByRole("checkbox", { name: "Read from Discord" })).toBeChecked();
   }
 
   async editScheduleToWeekdays() {
@@ -553,7 +657,7 @@ export class OrganizationTriggers {
     await this.page.screenshot({ path });
   }
 
-  private async selectAgent(agentId: string) {
+  async selectAgent(agentId: string) {
     await this.page.getByRole("combobox", { name: "Agent" }).click();
     await this.page.locator(`[role="option"][data-value=${JSON.stringify(agentId)}]`).click();
   }
