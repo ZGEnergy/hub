@@ -2,13 +2,16 @@ import {
   Client,
   DiscordAPIError,
   GatewayIntentBits,
+  MessageFlags,
   RESTJSONErrorCodes,
   type GuildBasedChannel,
   type Message,
+  type REST,
   type TextBasedChannel,
 } from "discord.js";
 import { Routes } from "discord-api-types/v10";
 import { reportFailure } from "../../failures/index.js";
+import { resolveDiscordMessageThread } from "../../discord/message-thread.js";
 import { DiscordSnowflakeSchema } from "../../discord/snowflake.js";
 import { NormalizedDiscordContextMessageSchema } from "./events.js";
 import type { NormalizedDiscordContextMessage } from "./events.js";
@@ -114,7 +117,9 @@ export interface CreateDiscordBotClientOptions {
   client?: Client;
 }
 
-export function createDiscordBotClient(options: CreateDiscordBotClientOptions): DiscordBotClient {
+export function createDiscordBotClient(
+  options: CreateDiscordBotClientOptions,
+): DiscordBotClient & { readonly rest: REST } {
   const client =
     options.client ??
     new Client({
@@ -124,6 +129,7 @@ export function createDiscordBotClient(options: CreateDiscordBotClientOptions): 
         GatewayIntentBits.MessageContent,
       ],
     });
+  if (options.client === undefined) client.rest.setToken(options.token);
   const handlers = new Set<DiscordRawMessageHandler>();
   const guildDeleteHandlers = new Set<DiscordGuildDeleteHandler>();
   const pendingReplyDestinations = new Map<string, Promise<DiscordSendableChannel>>();
@@ -163,6 +169,7 @@ export function createDiscordBotClient(options: CreateDiscordBotClientOptions): 
   });
 
   return {
+    rest: client.rest,
     async start() {
       if (started) {
         return;
@@ -229,7 +236,11 @@ export function createDiscordBotClient(options: CreateDiscordBotClientOptions): 
         input.threadId === undefined || input.threadId === null
           ? await resolveReplyDestination(client, input, pendingReplyDestinations)
           : await fetchSendableChannel(client, input.threadId);
-      await channel.send({ content: input.content, allowedMentions: { parse: [] } });
+      await channel.send({
+        content: input.content,
+        allowedMentions: { parse: [] },
+        flags: MessageFlags.SuppressEmbeds,
+      });
     },
     async readMessage(input) {
       const message = await fetchMessage(
@@ -295,9 +306,11 @@ async function resolveReplyDestination(
 
   const resolution = (async () => {
     const message = await fetchMessage(client, channelId, messageId);
-    const thread = message.hasThread
-      ? await fetchSendableChannel(client, messageId)
-      : await message.startThread({ name: createThreadName(message.content) });
+    const thread = await resolveDiscordMessageThread({
+      hasThread: message.hasThread,
+      readThread: () => fetchSendableChannel(client, messageId),
+      createThread: () => message.startThread({ name: createThreadName(message.content) }),
+    });
     if (!isSendableChannel(thread)) throw new Error(`discord channel not sendable: ${thread.id}`);
     return thread;
   })();

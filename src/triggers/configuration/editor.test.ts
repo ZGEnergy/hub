@@ -5,6 +5,7 @@ import { TriggerDocumentSchema } from "./schema.js";
 import {
   changeTriggerEvent,
   createTriggerYaml,
+  describeTriggerEvent,
   mergeTriggerForm,
   patchTriggerYaml,
   projectTriggerForm,
@@ -71,6 +72,53 @@ describe("trigger form YAML bridge", () => {
     if (projection.status === "editable") {
       expect(patchTriggerYaml(ADVANCED, projection.value)).toBe(ADVANCED);
     }
+  });
+
+  const CHAT_GRANT = ADVANCED.replace(
+    "run:",
+    `run:
+  tools:
+    slack:
+      channels: [CDIGEST] # keep the channel comment
+      connection: engineering-slack
+      actions: [post]`,
+  );
+
+  test.each([
+    [
+      "into the grant",
+      CHAT_GRANT.replace("connection: company", "connection: &workspace company").replace(
+        "connection: engineering-slack",
+        "connection: *workspace",
+      ),
+    ],
+    [
+      "out of the grant",
+      CHAT_GRANT.replace(
+        "connection: engineering-slack",
+        "connection: &workspace engineering-slack",
+      ).replace("TEAM: core", "TEAM: core\n    DIGEST_CONNECTION: *workspace"),
+    ],
+  ])("keeps a trigger in YAML when anchors link %s", (_, yaml) => {
+    expect(TriggerDocumentSchema.safeParse(parseDocument(yaml).toJS()).success).toBe(true);
+    const projection = projectTriggerForm(yaml);
+    if (projection.status !== "yaml_only") throw new Error("Expected the form to be unavailable.");
+    expect(projection.reason).toMatch(/integration tool grants.*anchors or aliases/i);
+  });
+
+  test("preserves channel comments when changing unrelated grant fields", () => {
+    const projection = projectTriggerForm(CHAT_GRANT);
+    if (projection.status !== "editable") throw new Error(projection.reason);
+    const saved = patchTriggerYaml(CHAT_GRANT, {
+      ...projection.value,
+      tools: {
+        slack: { ...projection.value.tools.slack!, actions: ["read", "post"] },
+      },
+    });
+    expect(saved).toMatch(/channels: \[\s*CDIGEST\s*\] # keep the channel comment/);
+    const amended = projectTriggerForm(saved);
+    if (amended.status !== "editable") throw new Error(amended.reason);
+    expect(amended.value.tools.slack?.actions).toEqual(["read", "post"]);
   });
 
   test("patches owned nodes while preserving comments and advanced configuration", () => {
@@ -172,6 +220,7 @@ describe("trigger form YAML bridge", () => {
       githubRepositories: "",
       githubPermissions: "",
       githubDuration: "1h",
+      tools: {},
       prompt: "Handle it.",
     });
     expect(parseDocument(yaml).toJS()).toEqual({
@@ -211,6 +260,7 @@ describe("trigger form YAML bridge", () => {
       githubRepositories: "",
       githubPermissions: "",
       githubDuration: "1h",
+      tools: {},
       prompt: "${{ paseo.prompt }}",
     });
     const projection = projectTriggerForm(initial);
@@ -331,6 +381,7 @@ describe("what the form still needs", () => {
 
 test.each([
   "github.pull_request_created",
+  "github.pull_request_ready_for_review",
   "github.issue_created",
   "linear.issue_assigned",
   "linear.comment_created",
@@ -448,4 +499,74 @@ test("continuation policies round-trip through the form and YAML", () => {
     expect(next).toMatchObject({ status: "editable", value: { continuationMode: mode } });
     expect(yaml).toContain("# keep this heading");
   }
+});
+
+test("a trigger row names the event kind before what narrows it", () => {
+  const projection = projectTriggerForm(ADVANCED);
+  if (projection.status !== "editable") throw new Error(projection.reason);
+  const slack = projection.value;
+  expect(describeTriggerEvent(slack, "slack.mention")).toEqual({
+    kind: "Slack mention",
+    detail: "company",
+  });
+  // The recurrence used to stand in for the kind, so a schedule's row never said "Schedule".
+  const schedule = {
+    ...slack,
+    event: "schedule.tick" as const,
+    connection: "",
+    recurrence: { start: "2026-01-01T08:15:00", rule: "FREQ=DAILY", timezone: "UTC" },
+  };
+  expect(describeTriggerEvent(schedule, "schedule.tick")).toEqual({
+    kind: "Schedule",
+    detail: "Every day at 08:15 (UTC)",
+  });
+  expect(
+    describeTriggerEvent({ ...slack, event: "manual.run", connection: "" }, "manual.run"),
+  ).toEqual({
+    kind: "Manual run",
+  });
+  expect(describeTriggerEvent(null, "github.push")).toEqual({ kind: "GitHub push" });
+});
+
+test("a provider with zero modes saves without a mode in the form and YAML", () => {
+  const projected = projectTriggerForm(ADVANCED);
+  if (projected.status !== "editable") throw new Error("expected editable form");
+  const value = { ...projected.value, agent: "pi/test-model", mode: "" };
+  expect(triggerFormErrors(value, []).mode).toBeUndefined();
+  const patched = patchTriggerYaml(ADVANCED, value);
+  expect(TriggerDocumentSchema.parse(parseDocument(patched).toJS()).run.agent).not.toHaveProperty(
+    "mode",
+  );
+  const yaml = createTriggerYaml(value);
+  expect(TriggerDocumentSchema.parse(parseDocument(yaml).toJS()).run.agent).not.toHaveProperty(
+    "mode",
+  );
+});
+
+test("form submission requires concrete model and mode selections without rejecting YAML omissions", () => {
+  const projected = projectTriggerForm(ADVANCED);
+  if (projected.status !== "editable") throw new Error("expected editable form");
+  expect(triggerFormErrors({ ...projected.value, agent: "codex" }).agent).toBe(
+    "Choose a provider and model.",
+  );
+  expect(triggerFormErrors({ ...projected.value, mode: "" }, [{ id: "full-access" }]).mode).toBe(
+    "Execution mode is required.",
+  );
+  const yaml = ADVANCED.replace("    model: gpt-5.4\n", "").replace("    mode: full-access\n", "");
+  const existing = projectTriggerForm(yaml);
+  expect(existing.status).toBe("editable");
+  if (existing.status !== "editable") throw new Error("expected editable YAML");
+  expect(patchTriggerYaml(yaml, { ...existing.value, prompt: "Updated YAML content" })).toContain(
+    "Updated YAML content",
+  );
+});
+
+test("the form waits to learn that a provider has no modes", () => {
+  const projected = projectTriggerForm(ADVANCED);
+  if (projected.status !== "editable") throw new Error("expected editable form");
+  const value = { ...projected.value, mode: "" };
+  expect(triggerFormErrors(value).mode).toBe(
+    "Load execution modes from the selected daemon or save as YAML.",
+  );
+  expect(triggerFormErrors(value, []).mode).toBeUndefined();
 });

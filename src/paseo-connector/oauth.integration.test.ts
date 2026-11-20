@@ -441,7 +441,7 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
     });
   });
 
-  it.each(["initial", "resent"] as const)(
+  it.each(["initial", "sign-in", "resent"] as const)(
     "completes explicit prompt=create with the %s verification email",
     async (verification) => {
       const verifications: { url: string }[] = [];
@@ -482,7 +482,23 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
           oauth_query: request.connectQuery,
         }),
       ).toBe(403);
-      expect(verifications).toHaveLength(1);
+      // Every unverified sign-in is mailed a fresh link; this raw request names no continuation.
+      expect(verifications).toHaveLength(2);
+      let link = verifications[0]!.url;
+      if (verification === "sign-in") {
+        await expect(
+          verifiedAuth.signInEmail!(
+            {
+              email: browser.email,
+              password: "account-password",
+              oauthQuery: request.connectQuery,
+            },
+            browser.headers(),
+          ),
+        ).rejects.toMatchObject({ body: { code: "EMAIL_NOT_VERIFIED" } });
+        expect(verifications).toHaveLength(3);
+        link = verifications.at(-1)!.url;
+      }
       if (verification === "resent") {
         const application = await createApplicationRuntime({
           database,
@@ -498,8 +514,9 @@ describe.each(["embedded", "postgres"] as const)("Paseo Agent Connector OAuth on
           request.connectQuery,
         );
         await application.stop();
+        link = verifications.at(-1)!.url;
       }
-      const connectQuery = await browser.verifyOAuth(verifications.at(-1)!.url);
+      const connectQuery = await browser.verifyOAuth(link);
       const machine = await enroll(await browser.createOrganization());
       const consent = await select(browser, connectQuery.search, machine);
       expect(await verifiedAuth.connector!.listConnections(browser.headers())).toEqual([]);

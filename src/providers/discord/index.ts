@@ -1,10 +1,12 @@
+import { REST } from "discord.js";
+import { createDiscordIntegrationTools } from "../../integration-tools/index.js";
 import type { AuthServer } from "../../auth/server.js";
 import type { Database, DiscordConnectionRecord } from "../../db/types.js";
 import { reportFailure } from "../../failures/index.js";
 import type { ProviderConnectionRegistration, ProviderRegistration } from "../registration.js";
 import {
   CONNECTION_ATTEMPT_LIFETIME_MINUTES,
-  CONNECTIONS_RETURN_ROUTE,
+  INTEGRATIONS_RETURN_ROUTE,
   callbackConnectionAccess,
   cancelledConnectionResult,
   connectionAccess,
@@ -42,6 +44,7 @@ export interface CreateDiscordRegistrationOptions {
   publicBaseUrl?: string;
   configuration?: DiscordRegistrationConfiguration | null;
   bot?: DiscordBotClient;
+  integrationRest?: REST;
   connectionClient?: DiscordConnectionClient;
   fetch?: typeof fetch;
   configurationVersion?: number;
@@ -68,12 +71,13 @@ export function createDiscordRegistration(
   }
   const database = options.database;
 
-  const bot =
-    options.bot ??
-    createDiscordBotClient({
-      token: configuration.botToken,
-      clientId: configuration.clientId,
-    });
+  const nativeBot =
+    options.bot === undefined
+      ? createDiscordBotClient({ token: configuration.botToken, clientId: configuration.clientId })
+      : undefined;
+  const bot = options.bot ?? nativeBot!;
+  const rest =
+    options.integrationRest ?? nativeBot?.rest ?? new REST().setToken(configuration.botToken);
   const client =
     options.connectionClient ??
     createDiscordConnectionClient({
@@ -120,6 +124,9 @@ export function createDiscordRegistration(
         }),
     ],
     sources: [gateway],
+    integrationTools: {
+      discord: createDiscordIntegrationTools(database, configuration.clientId, rest),
+    },
     outputs: [
       {
         type: "discord.reply",
@@ -284,10 +291,10 @@ async function completeAuthorization(
       provider: "discord",
       phase: "authorization",
       applicationBaseUrl: options.applicationBaseUrl,
-      returnRoute: CONNECTIONS_RETURN_ROUTE,
+      returnRoute: INTEGRATIONS_RETURN_ROUTE,
     });
   }
-  let returnRoute: string = CONNECTIONS_RETURN_ROUTE;
+  let returnRoute: string = INTEGRATIONS_RETURN_ROUTE;
   let callbackOrigin = options.applicationBaseUrl;
   try {
     const access = await callbackConnectionAccess(options.auth, request);

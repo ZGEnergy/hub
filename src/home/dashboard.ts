@@ -6,11 +6,15 @@ import type {
   UnroutedProviderEventCount,
 } from "../db/types.js";
 import { resolveRouteTenant } from "../projects/access.js";
-import { projectTriggerForm } from "../triggers/configuration/editor.js";
+import { configuredTriggerEvents } from "../triggers/store.js";
 
 /** How far back the overview looks. One week is long enough to hold a first run and short enough that a nudge fades once a trigger listens. */
 export const HOME_WINDOW_DAYS = 7;
 const RUNS_SHOWN = 50;
+const RECENT_RUNS_SHOWN = 5;
+const BEGINNING = new Date(0);
+
+export type HomeRun = Omit<OrganizationRunRecord, "receivedAt"> & { receivedAt: string };
 
 export interface HomeSnapshot {
   organization: { id: string; name: string; slug: string };
@@ -28,8 +32,15 @@ export interface HomeSnapshot {
     /** Enrolled with `hub.execute`; without it Hub can see the daemon but launch nothing on it. */
     canExecute: boolean;
   }[];
-  triggers: readonly { id: string; name: string; event: string; enabled: boolean }[];
-  runs: readonly (Omit<OrganizationRunRecord, "receivedAt"> & { receivedAt: string })[];
+  triggers: readonly { id: string; name: string; events: readonly string[]; enabled: boolean }[];
+  /** The overview's window: every run in the last `windowDays`, newest first. */
+  runs: readonly HomeRun[];
+  /**
+   * The newest runs the organization ever had, whatever their age. An organization that has run
+   * before is not new: this is what ends the checklist and what keeps Recent runs on the page
+   * through a quiet week.
+   */
+  recentRuns: readonly HomeRun[];
   unrouted: readonly UnroutedProviderEventCount[];
   windowDays: number;
 }
@@ -58,7 +69,7 @@ export class HomeDashboard {
     const organizationId = tenant.organization.id;
     const since = new Date(this.now().getTime() - HOME_WINDOW_DAYS * 86_400_000);
     const triggers = await this.database.listOrganizationTriggers(organizationId);
-    const [connections, daemons, revisions, runs, unrouted] = await Promise.all([
+    const [connections, daemons, revisions, runs, recentRuns, unrouted] = await Promise.all([
       this.database.organizationConnectionUsage(organizationId),
       this.database.listDaemonsForOrganization(organizationId),
       Promise.all(
@@ -67,6 +78,7 @@ export class HomeDashboard {
         ),
       ),
       this.database.listOrganizationRunsSince(organizationId, since, RUNS_SHOWN),
+      this.database.listOrganizationRunsSince(organizationId, BEGINNING, RECENT_RUNS_SHOWN),
       this.database.countUnroutedProviderEventsSince(organizationId, since),
     ]);
     return {
@@ -105,27 +117,17 @@ export class HomeDashboard {
       triggers: triggers.map((trigger, index) => ({
         id: trigger.id,
         name: trigger.name,
-        event: triggerEvent(revisions[index]?.yaml),
+        events: configuredTriggerEvents(trigger.format, revisions[index]),
         enabled: trigger.enabled,
       })),
-      runs: runs.map((run) => ({
-        id: run.id,
-        triggerName: run.triggerName,
-        provider: run.provider,
-        source: run.source,
-        status: run.status,
-        receivedAt: run.receivedAt.toISOString(),
-        agent: run.agent,
-      })),
+      runs: runs.map(toHomeRun),
+      recentRuns: recentRuns.map(toHomeRun),
       unrouted,
       windowDays: HOME_WINDOW_DAYS,
     };
   }
 }
 
-/** The one event a self-contained trigger listens for; a legacy document has none to name. */
-function triggerEvent(yaml: string | undefined): string {
-  if (yaml === undefined) return "manual.run";
-  const projection = projectTriggerForm(yaml);
-  return projection.status === "editable" ? projection.value.event : "manual.run";
+function toHomeRun(run: OrganizationRunRecord): HomeRun {
+  return { ...run, receivedAt: run.receivedAt.toISOString() };
 }

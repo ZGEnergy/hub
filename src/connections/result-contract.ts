@@ -27,6 +27,8 @@ export const connectionResultSchema = z.enum([
   "slack_cancelled",
   "linear_cancelled",
   "github_approval_required",
+  /** GitHub refused the authorization, or did not show the person as owning the account. */
+  "github_verification_rejected",
   "slack_bot_failed",
   "provider_not_configured",
   /** The state was forged, expired, already used, or belongs to a different session. */
@@ -54,11 +56,11 @@ export type ConnectionReturnCopy =
 /**
  * Where a callback lands when the attempt that started it cannot be read, so neither the
  * organization nor the surface is known. The connections landing forwards to the active
- * organization's connections page; when no organization is active yet, the shell's own gates
+ * organization's integrations page; when no organization is active yet, the shell's own gates
  * render first and the return survives in the query until a connections surface reads it.
  * Never the dashboard landing: that is not a connections surface.
  */
-export const CONNECTIONS_RETURN_ROUTE = "/connections";
+export const INTEGRATIONS_RETURN_ROUTE = "/integrations";
 
 const RETURN_PARAMS = { provider: "app", result: "result", reference: "reference" } as const;
 
@@ -145,7 +147,7 @@ const RETURN_COPY: Readonly<Record<ConnectionResult, (name: string) => Connectio
   discord_disconnected: disconnected,
   slack_disconnected: disconnected,
   linear_disconnected: disconnected,
-  github_cancelled: (name) => cancelled("Installation", name),
+  github_cancelled: (name) => cancelled("Authorization", name),
   slack_cancelled: (name) => cancelled("Installation", name),
   discord_cancelled: (name) => cancelled("Authorization", name),
   linear_cancelled: (name) => cancelled("Authorization", name),
@@ -153,6 +155,11 @@ const RETURN_COPY: Readonly<Record<ConnectionResult, (name: string) => Connectio
     failed(
       name,
       "A GitHub organization owner has to approve this installation. Nothing was connected. Ask an owner to approve the request, then install again.",
+    ),
+  github_verification_rejected: (name) =>
+    failed(
+      name,
+      "GitHub didn't confirm that you can connect that account. Nothing was connected. Connect GitHub again, and pick an account you own.",
     ),
   slack_bot_failed: (name) =>
     failed(

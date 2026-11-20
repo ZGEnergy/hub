@@ -334,7 +334,7 @@ appear in it.
 - **Registration rate limiting is weak (operator hardening).** The pinned library's only limit on
   registration is 5 requests per 60 seconds, and it applies only when `NODE_ENV=production`: Hub sets no
   rate-limit option of its own, and the Dockerfile, `compose.yml` and `npm start` do not set
-  `NODE_ENV=production` (`fly.toml` does). The counters live in process memory, so a restart clears them.
+  `NODE_ENV=production` (`fly.example.toml` does). The counters live in process memory, so a restart clears them.
   They are keyed on `x-forwarded-for`, or on the header named by `PASEO_HUB_TRUSTED_CLIENT_IP_HEADER` when
   set, so unless a trusted proxy overwrites that header a caller can vary it to get fresh buckets. With no
   client-IP header at all, every caller shares one bucket: anyone can exhaust it and block new links for

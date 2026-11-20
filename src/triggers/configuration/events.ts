@@ -13,7 +13,7 @@ export interface QualifierDefinition {
 }
 
 interface EventDefinition {
-  provider: "github" | "slack" | "discord" | "linear" | "manual" | "schedule";
+  provider: "github" | "slack" | "discord" | "linear" | "manual" | "schedule" | "webhook";
   label: string;
   origin: "hub" | "provider";
   qualifiers: readonly QualifierDefinition[];
@@ -37,7 +37,10 @@ function event(
     provider,
     label,
     qualifiers,
-    origin: provider === "manual" || provider === "schedule" ? "hub" : "provider",
+    origin:
+      provider === "manual" || provider === "schedule" || provider === "webhook"
+        ? "hub"
+        : "provider",
   };
 }
 
@@ -46,6 +49,11 @@ const EVENTS = {
   "discord.mention": event("discord", "Discord mention"),
   "github.issue_created": event("github", "GitHub issue created"),
   "github.pull_request_created": event("github", "GitHub pull request created"),
+  "github.pull_request_ready_for_review": event("github", "GitHub pull request ready for review"),
+  "github.pull_request_synchronized": event(
+    "github",
+    "GitHub pull request updated with new commits",
+  ),
   "github.issue_comment_created": event("github", "GitHub issue comment created"),
   "github.pull_request_comment_created": event("github", "GitHub pull request comment created"),
   "github.issue_label_added": event("github", "GitHub issue label added", [ADDED_LABEL]),
@@ -62,6 +70,7 @@ const EVENTS = {
   "linear.issue_assigned": event("linear", "Linear issue assigned"),
   "linear.comment_created": event("linear", "Linear comment created"),
   "schedule.tick": event("schedule", "Schedule"),
+  "webhook.received": event("webhook", "Webhook received"),
   "manual.run": event("manual", "Manual run"),
 };
 

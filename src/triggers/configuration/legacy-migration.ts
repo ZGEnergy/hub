@@ -160,6 +160,7 @@ function singleRunDocument(
         ? {}
         : { startup_timeout: duration(step.startupTimeoutMs) }),
       ...(step.env === undefined ? {} : { env: { ...step.env } }),
+      ...(step.tools === undefined ? {} : { tools: step.tools }),
       ...(step.github === undefined
         ? {}
         : {
@@ -177,6 +178,7 @@ function singleRunDocument(
         : { output: { schema: structuredClone(asJsonObject(step.output.schema)) } }),
       ...(Object.keys(outputs).length === 0 ? {} : { outputs }),
       auto_archive: step.autoArchive,
+      background: step.background,
     },
   };
 }

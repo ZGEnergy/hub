@@ -1,3 +1,4 @@
+import type { IntegrationToolGrants } from "../integration-tools/grants.js";
 import type { AllowedOutput } from "../execution-capabilities/outputs.js";
 import type { TriggerAgentConfig } from "../triggers/index.js";
 import type { WorktreeTarget } from "../config/index.js";
@@ -22,11 +23,13 @@ export interface LaunchMachineIntent {
   projectId: string;
   triggerRunId: string;
   workflowStepRunId?: string;
+  /** The trigger's name as the user wrote it; never the internal name of one of its events. */
   triggerName: string;
   environmentName: string;
   environment: DaemonEnvironmentTarget;
   env?: Readonly<Record<string, string>>;
   github?: CompiledGitHubAuthority;
+  tools?: IntegrationToolGrants;
   /** Authored workspace title, already rendered; absent means Hub's default workspace title. */
   title?: string;
   prompt: string;
@@ -36,6 +39,7 @@ export interface LaunchMachineIntent {
   startupTimeoutMs?: number;
   idleTimeoutMs?: number;
   autoArchive: boolean;
+  background: boolean;
   triggerContext: unknown;
   outputContext: unknown;
   outputSchema?: JsonValue;
@@ -54,6 +58,7 @@ export function buildLaunchMachineIntent(input: {
   environment: DaemonEnvironmentTarget;
   env?: Readonly<Record<string, string>>;
   github?: CompiledGitHubAuthority;
+  tools?: IntegrationToolGrants;
   title?: string;
   prompt: string;
   agent: TriggerAgentConfig;
@@ -62,6 +67,7 @@ export function buildLaunchMachineIntent(input: {
   startupTimeoutMs?: number;
   idleTimeoutMs?: number;
   autoArchive: boolean;
+  background: boolean;
   triggerContext: unknown;
   outputContext: unknown;
   hubConfig: unknown;
@@ -76,6 +82,7 @@ export function buildLaunchMachineIntent(input: {
     environment: input.environment,
     ...(input.env === undefined ? {} : { env: input.env }),
     ...(input.github === undefined ? {} : { github: input.github }),
+    ...(input.tools === undefined ? {} : { tools: input.tools }),
     ...(input.title === undefined ? {} : { title: input.title }),
     prompt: input.prompt,
     agent: input.agent,
@@ -84,6 +91,7 @@ export function buildLaunchMachineIntent(input: {
     ...(input.startupTimeoutMs === undefined ? {} : { startupTimeoutMs: input.startupTimeoutMs }),
     ...(input.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: input.idleTimeoutMs }),
     autoArchive: input.autoArchive,
+    background: input.background,
     triggerContext: input.triggerContext,
     outputContext: input.outputContext,
     configurationRevisionId: input.configurationRevisionId,

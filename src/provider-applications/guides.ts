@@ -289,8 +289,8 @@ export const GITHUB_GUIDE: ProviderGuide = {
   actions: {
     save: "Verify and save",
     savePending: "Verifying…",
-    connect: "Install on GitHub",
-    connectAgain: "Add another installation",
+    connect: "Connect GitHub",
+    connectAgain: "Connect GitHub",
   },
   verifiedMessage: "GitHub accepted this App.",
   requiresHttps: false,
