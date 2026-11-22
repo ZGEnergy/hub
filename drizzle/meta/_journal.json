@@ -348,15 +348,36 @@
     {
       "idx": 49,
       "version": "7",
-      "when": 1790822954369,
-      "tag": "0049_bright_thundra",
+      "when": 1792167954503,
+      "tag": "0049_github_installation_syncs",
       "breakpoints": true
     },
     {
       "idx": 50,
       "version": "7",
+      "when": 1794641715943,
+      "tag": "0050_github_installation_choices",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1795171114885,
+      "tag": "0051_trigger_webhooks",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1790822954369,
+      "tag": "0052_bright_thundra",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
       "when": 1790824228662,
-      "tag": "0050_next_the_initiative",
+      "tag": "0053_next_the_initiative",
       "breakpoints": true
     }
   ]

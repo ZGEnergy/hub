@@ -1,6 +1,7 @@
 /* oxlint-disable eslint-plugin-react-perf/jsx-no-new-function-as-prop, eslint-plugin-react-perf/jsx-no-new-object-as-prop, eslint-plugin-react-perf/jsx-no-new-array-as-prop, eslint-plugin-react-perf/jsx-no-jsx-as-prop -- focused trigger screens bind one document, and a row's link, timestamp, and action are that row's own slots */
 /* oxlint-disable typescript-eslint/no-unsafe-type-assertion -- generated routes cannot express server-resolved organization URLs */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSnapshotQuery } from "../queries/index.js";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { ArrowLeft, Braces, FileText, LockKeyhole, Plus } from "lucide-react";
@@ -30,7 +31,7 @@ import { CodeEditor } from "../projects/configuration/code-editor.js";
 import { useRouteTenant } from "../projects/context.js";
 import type { Result } from "../contract/respond.js";
 import {
-  summarizeTriggerEvent,
+  describeTriggerEvent,
   changeTriggerEvent,
   mergeTriggerForm,
   projectTriggerForm,
@@ -38,13 +39,14 @@ import {
   type TriggerFieldErrors,
   type TriggerFormValue,
 } from "./configuration/editor.js";
+import { WebhookSettings } from "./webhook/settings.js";
 import { saveTrigger, triggerSnapshot, type TriggerSnapshot } from "./functions.js";
 import { daemonProviderSnapshot } from "../daemons/functions.js";
-import type { HubProviderSnapshot, HubProviderSnapshotEntry } from "../hub/protocol.js";
+import type { HubProviderSnapshotEntry } from "../hub/protocol.js";
+import { IntegrationToolFields } from "./integration-tool-fields.js";
 import { EventFields } from "./event-fields.js";
 import { EDITOR_EVENTS, eventDefinition, parseEditorEvent } from "./configuration/events.js";
-import { selectedProviderModel } from "./provider-catalog.js";
-import { supportsUnattendedRuns } from "./configuration/unattended.js";
+import { changeTriggerModel, selectedProviderModel } from "./provider-catalog.js";
 
 type BrowserTrigger = TriggerSnapshot["triggers"][number];
 type EditorMode = "form" | "yaml";
@@ -58,9 +60,9 @@ type TriggerTextField = Exclude<
 >;
 
 const TRIGGER_COLUMNS = [
-  { header: "Trigger" },
-  { header: "Event", className: "hidden md:table-cell" },
-  { header: "Target", className: "hidden lg:table-cell" },
+  { header: "Trigger", fill: true },
+  { header: "Event", fill: true, className: "hidden md:table-cell" },
+  { header: "Target", fill: true, className: "hidden xl:table-cell" },
   { header: "Last triggered", className: "hidden xl:table-cell" },
   { header: "Status" },
 ] as const;
@@ -84,7 +86,7 @@ export function TriggersPanel() {
   const scope = { organizationSlug: tenant.organization.slug };
   const snapshot = useTriggerSnapshot(scope.organizationSlug);
   const navigate = useNavigate();
-  if (snapshot.isPending) {
+  if (snapshot.status === "pending") {
     return (
       <>
         <PageHeader title="Triggers" description={TRIGGERS_DESCRIPTION} />
@@ -92,10 +94,10 @@ export function TriggersPanel() {
       </>
     );
   }
-  if (snapshot.isError || snapshot.data.status === "error") {
-    return <TriggerLoadError result={snapshot.data} />;
+  if (snapshot.status === "error") {
+    return <TriggerLoadError error={snapshot.error} />;
   }
-  const data = snapshot.data.data;
+  const data = snapshot.data;
   const triggerPath = (triggerId: string) =>
     `/o/${scope.organizationSlug}/triggers/${triggerId}` as never;
   return (
@@ -139,7 +141,7 @@ export function TriggersPanel() {
               }}
             >
               <DataCell>
-                <span className="flex min-w-52 items-center gap-3">
+                <span className="flex items-center gap-3">
                   <span
                     className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-muted text-foreground"
                     role="img"
@@ -151,6 +153,7 @@ export function TriggersPanel() {
                     primary={
                       <Link
                         to={triggerPath(trigger.id)}
+                        title={trigger.name}
                         className="hover:underline"
                         onClick={(event) => event.stopPropagation()}
                       >
@@ -165,22 +168,17 @@ export function TriggersPanel() {
                   />
                 </span>
               </DataCell>
-              <DataCell className="hidden whitespace-nowrap md:table-cell">
-                <TwoLine
-                  primary={summarizeTriggerEvent(trigger.draft, trigger.event)}
-                  {...(trigger.draft?.connection === "" || trigger.draft?.connection === undefined
-                    ? {}
-                    : { secondary: trigger.draft.connection })}
-                />
+              <DataCell>
+                <TriggerEvent trigger={trigger} />
               </DataCell>
-              <DataCell className="hidden whitespace-nowrap lg:table-cell">
+              <DataCell>
                 {trigger.draft === null ? (
                   <span className="text-muted-foreground">Advanced configuration</span>
                 ) : (
-                  <TwoLine mono primary={trigger.draft.daemon} secondary={trigger.draft.cwd} />
+                  <TwoLine path primary={trigger.draft.daemon} secondary={trigger.draft.cwd} />
                 )}
               </DataCell>
-              <DataCell className="hidden whitespace-nowrap xl:table-cell">
+              <DataCell>
                 {trigger.lastTriggered === null ? (
                   <span className="text-muted-foreground">Never</span>
                 ) : (
@@ -203,6 +201,11 @@ export function TriggersPanel() {
   );
 }
 
+function TriggerEvent({ trigger }: { trigger: BrowserTrigger }) {
+  const { kind, detail } = describeTriggerEvent(trigger.draft, trigger.event);
+  return <TwoLine primary={kind} {...(detail === undefined ? {} : { secondary: detail })} />;
+}
+
 export function TriggerEditorPanel({ triggerId }: { triggerId: string }) {
   const tenant = useRouteTenant();
   const organizationSlug = tenant.organization.slug;
@@ -220,11 +223,11 @@ export function TriggerEditorPanel({ triggerId }: { triggerId: string }) {
       await navigate({ to: `/o/${organizationSlug}/triggers` as never });
     },
   });
-  if (snapshot.isPending) return <TriggerEditorSkeleton />;
-  if (snapshot.isError || snapshot.data.status === "error") {
-    return <TriggerLoadError result={snapshot.data} />;
+  if (snapshot.status === "pending") return <TriggerEditorSkeleton />;
+  if (snapshot.status === "error") {
+    return <TriggerLoadError error={snapshot.error} />;
   }
-  const data = snapshot.data.data;
+  const data = snapshot.data;
   const trigger = triggerId === "new" ? null : data.triggers.find(({ id }) => id === triggerId);
   if (trigger === undefined) {
     return (
@@ -235,43 +238,55 @@ export function TriggerEditorPanel({ triggerId }: { triggerId: string }) {
       />
     );
   }
+  const webhook = data.webhooks.find((endpoint) => endpoint.triggerId === trigger?.id);
   const returnToList = () => {
     void navigate({ to: `/o/${organizationSlug}/triggers` as never });
   };
   return (
-    <TriggerEditor
-      key={trigger?.id ?? "new"}
-      trigger={trigger}
-      snapshot={data}
-      saving={save.isPending}
-      saveError={save.data?.status === "error" ? save.data.error.message : undefined}
-      onCancel={returnToList}
-      onSave={(yaml) =>
-        save.mutate({
-          data: {
-            organizationSlug,
-            ...(trigger?.id === undefined ? {} : { triggerId: trigger.id }),
-            yaml,
-          },
-        })
-      }
-    />
+    <>
+      <TriggerEditor
+        key={trigger?.id ?? "new"}
+        trigger={trigger}
+        snapshot={data}
+        saving={save.isPending}
+        saveError={save.data?.status === "error" ? save.data.error.message : undefined}
+        onCancel={returnToList}
+        onSave={(yaml) =>
+          save.mutate({
+            data: {
+              organizationSlug,
+              ...(trigger?.id === undefined ? {} : { triggerId: trigger.id }),
+              yaml,
+            },
+          })
+        }
+      />
+      {webhook === undefined ? null : (
+        <WebhookSettings
+          key={webhook.endpointId}
+          organizationSlug={organizationSlug}
+          origin={data.webhookOrigin}
+          endpoint={webhook}
+          canManage={data.canManage}
+        />
+      )}
+    </>
   );
 }
 
 function useTriggerSnapshot(organizationSlug: string) {
   const load = useServerFn(triggerSnapshot);
-  return useQuery({
+  return useSnapshotQuery({
     queryKey: ["triggers", organizationSlug],
     queryFn: () => load({ data: { organizationSlug } }),
   });
 }
 
-function TriggerLoadError({ result }: { result: Result<TriggerSnapshot> | undefined }) {
+function TriggerLoadError({ error }: { error: string | null }) {
   return (
     <FailureAlert
       title="Triggers unavailable"
-      error={result}
+      error={error}
       fallback="Hub couldn't load this organization's triggers."
     />
   );
@@ -388,6 +403,7 @@ function TriggerEditor({
               errors={editor.errors}
               triggerId={trigger?.id}
               snapshot={snapshot}
+              providerCatalog={editor.providerCatalog}
               onChange={editor.setForm}
             />
           )}
@@ -426,8 +442,16 @@ function useTriggerEditorState(
   const initialForm = trigger?.draft ?? defaultForm(snapshot);
   const initialYaml = trigger?.yaml ?? "";
   const initialProjection = useMemo(() => projectTriggerForm(initialYaml), [initialYaml]);
+  const initialErrors =
+    initialProjection.status === "editable" ? triggerFormErrors(initialProjection.value) : {};
   const [mode, setMode] = useState<EditorMode>(
-    trigger === null || (initialProjection.status === "editable" && !legacy) ? "form" : "yaml",
+    trigger === null ||
+      (initialProjection.status === "editable" &&
+        !legacy &&
+        initialErrors.agent === undefined &&
+        initialProjection.value.mode.trim().length > 0)
+      ? "form"
+      : "yaml",
   );
   const [yaml, setYaml] = useState(initialYaml);
   const [form, setForm] = useState<TriggerFormValue>(
@@ -444,7 +468,14 @@ function useTriggerEditorState(
   // new trigger is not a page of errors, it is a page nobody has filled in. Once they have asked,
   // the marks stay and follow what they type.
   const [refused, setRefused] = useState(false);
-  const errors = useMemo(() => triggerFormErrors(form), [form]);
+  const selectedDaemon = snapshot.daemons.find((daemon) => daemon.slug === form.daemon);
+  const providerCatalog = useDaemonProviderCatalog(
+    snapshot.organization.slug,
+    mode === "form" ? selectedDaemon?.id : undefined,
+    form.cwd,
+  );
+  const { entry } = selectedProviderModel(providerCatalog.entries, form.agent);
+  const errors = triggerFormErrors(form, entry?.modes);
   const refuse = () => setRefused(true);
   const switchMode = (next: EditorMode) => {
     if (next === mode) return;
@@ -460,7 +491,7 @@ function useTriggerEditorState(
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (mode === "yaml") onSave(yaml);
-    else if (other.status === "ok") onSave(other.yaml);
+    else if (other.status === "ok" && Object.keys(errors).length === 0) onSave(other.yaml);
     else refuse();
   };
   return {
@@ -468,6 +499,7 @@ function useTriggerEditorState(
     yaml,
     form,
     errors: refused ? errors : NO_FIELD_ERRORS,
+    providerCatalog,
     // Legacy workflows are explained by their own alert; repeating the schema error underneath it
     // would say the same thing twice in less useful words.
     blocked: legacy ? undefined : blocked,
@@ -564,6 +596,7 @@ function TriggerForm({
   errors,
   triggerId,
   snapshot,
+  providerCatalog,
   onChange,
 }: {
   form: TriggerFormValue;
@@ -571,6 +604,7 @@ function TriggerForm({
   errors: TriggerFieldErrors;
   triggerId: string | undefined;
   snapshot: TriggerSnapshot;
+  providerCatalog: ReturnType<typeof useDaemonProviderCatalog>;
   onChange: (value: TriggerFormValue) => void;
 }) {
   const { provider } = eventDefinition(form.event);
@@ -603,11 +637,6 @@ function TriggerForm({
   const text = (key: TriggerTextField) => (value: string) => update(key, value);
   const selectedDaemon = snapshot.daemons.find((daemon) => daemon.slug === form.daemon);
   const noDaemons = snapshot.daemons.length === 0;
-  const providerCatalog = useDaemonProviderCatalog(
-    snapshot.organization.slug,
-    selectedDaemon?.id,
-    form.cwd,
-  );
   return (
     <div className="grid gap-6">
       <Card>
@@ -958,6 +987,12 @@ function TriggerForm({
                   ) : null}
                 </div>
               </Disclosure>
+              <IntegrationToolFields
+                tools={form.tools}
+                connections={snapshot.connections}
+                errors={errors}
+                onChange={(tools) => update("tools", tools)}
+              />
             </>
           )}
         </Card>
@@ -1125,10 +1160,8 @@ function ProviderCatalogFields({
   onChange: (value: TriggerFormValue) => void;
 }) {
   const selected = selectedProviderModel(entries, form.agent);
-  // A provider the daemon cannot run unattended is not offered: Hub sends a tool policy with every
-  // run, and the daemon refuses the policy at launch for any provider outside that set.
   const agentOptions = (entries ?? []).flatMap((entry) =>
-    entry.status !== "ready" || !entry.enabled || !supportsUnattendedRuns(entry.provider)
+    entry.status !== "ready" || !entry.enabled
       ? []
       : (entry.models ?? [])
           .filter((model) => model.isSelectable !== false)
@@ -1152,7 +1185,7 @@ function ProviderCatalogFields({
       <FormField
         id="trigger-agent"
         label="Agent"
-        description="Models the selected daemon can run unattended: Claude, Codex, or OpenCode."
+        description="Providers and models available on the selected daemon."
         required
         {...fieldError(errors, "agent")}
       >
@@ -1167,30 +1200,32 @@ function ProviderCatalogFields({
             searchPlaceholder="Search models…"
             empty="No models found."
             onChange={(option) =>
-              onChange({ ...form, agent: option.value, mode: "", thinkingOptionId: "" })
+              onChange(changeTriggerModel({ entries: entries ?? [], form, agent: option.value }))
             }
           />
         )}
       </FormField>
-      <FormField
-        id="trigger-mode"
-        label="Execution mode"
-        description="Modes reported for the selected provider."
-        required
-        {...fieldError(errors, "mode")}
-      >
-        {(control) => (
-          <Combobox
-            {...control}
-            required
-            value={form.mode}
-            options={modeOptions}
-            placeholder="Select a mode"
-            empty="No modes found."
-            onChange={(option) => onChange({ ...form, mode: option.value })}
-          />
-        )}
-      </FormField>
+      {modeOptions.length === 0 ? null : (
+        <FormField
+          id="trigger-mode"
+          label="Execution mode"
+          description="Modes reported for the selected provider."
+          required
+          {...fieldError(errors, "mode")}
+        >
+          {(control) => (
+            <Combobox
+              {...control}
+              required
+              value={form.mode}
+              options={modeOptions}
+              placeholder="Select a mode"
+              empty="No execution modes reported by this daemon."
+              onChange={(option) => onChange({ ...form, mode: option.value })}
+            />
+          )}
+        </FormField>
+      )}
       {thinkingOptions.length === 0 ? null : (
         <FormField
           id="trigger-thinking"
@@ -1221,10 +1256,9 @@ function useDaemonProviderCatalog(
   cwd: string,
 ) {
   const load = useServerFn(daemonProviderSnapshot);
-  const queryClient = useQueryClient();
   const queryKey = ["daemon-provider-snapshot", organizationSlug, daemonId, cwd] as const;
   const enabled = daemonId !== undefined && cwd.trim() !== "";
-  const query = useQuery({
+  const query = useSnapshotQuery({
     queryKey,
     enabled,
     queryFn: () =>
@@ -1232,36 +1266,20 @@ function useDaemonProviderCatalog(
         data: { organizationSlug, daemonId: daemonId!, cwd: cwd.trim(), refresh: true },
       }),
   });
-  const refresh = useMutation({
-    mutationFn: () =>
-      load({
-        data: { organizationSlug, daemonId: daemonId!, cwd: cwd.trim(), refresh: true },
-      }),
-    onSuccess: (result) => queryClient.setQueryData(queryKey, result),
-  });
-  const result = query.data;
-  const providerErrors =
-    result?.status === "ok"
-      ? result.data.entries
-          .filter((entry) => entry.status === "error")
-          .map((entry) => `${entry.label ?? entry.provider}: ${entry.error ?? "unavailable"}`)
-      : [];
+  const entries = query.data?.entries;
+  const providerErrors = (entries ?? [])
+    .filter((entry) => entry.status === "error")
+    .map((entry) => `${entry.label ?? entry.provider}: ${entry.error ?? "unavailable"}`);
+  const providerError = providerErrors.length > 0 ? providerErrors.join(" ") : undefined;
   return {
-    entries: result?.status === "ok" ? result.data.entries : undefined,
-    loading: (enabled && query.isPending) || refresh.isPending,
-    error: providerCatalogError(result, query.isError, providerErrors),
-    refresh: () => refresh.mutate(),
+    entries,
+    loading: query.isFetching,
+    error:
+      query.status === "error"
+        ? (query.error ?? "Hub couldn't load this daemon's providers.")
+        : providerError,
+    refresh: query.refetch,
   };
-}
-
-function providerCatalogError(
-  result: Result<HubProviderSnapshot> | undefined,
-  queryFailed: boolean,
-  providerErrors: string[],
-): string | undefined {
-  if (result?.status === "error") return result.error.message;
-  if (queryFailed) return "Hub couldn't load this daemon's providers.";
-  return providerErrors.length > 0 ? providerErrors.join(" ") : undefined;
 }
 
 /**
@@ -1295,6 +1313,7 @@ function defaultForm(snapshot: TriggerSnapshot): TriggerFormValue {
     githubRepositories: "",
     githubPermissions: "",
     githubDuration: "1h",
+    tools: {},
     prompt:
       "Handle this request in the originating conversation.\n\nWhen hub.reply is available, use it for useful progress updates and your final user-facing response. Call hub.finish_execution once the request is complete.\n\nRequest:\n${{ paseo.prompt }}",
   };

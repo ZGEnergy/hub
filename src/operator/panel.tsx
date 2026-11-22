@@ -1,6 +1,8 @@
-import { useCallback, useState, type FormEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSnapshotQuery } from "../queries/index.js";
+import { useCallback, useMemo, useState, type FormEvent } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
+import { Combobox } from "../components/app/combobox.js";
 import {
   DataCell,
   DataRow,
@@ -14,7 +16,8 @@ import { FormField } from "../components/app/form-field.js";
 import { PageHeader } from "../components/app/page.js";
 import { RelativeTime } from "../components/app/relative-time.js";
 import { Section } from "../components/app/section.js";
-import { StatusPill } from "../components/app/status-pill.js";
+import { StatusPill, statusLabel } from "../components/app/status-pill.js";
+import { SummaryPanel, type SummaryRow } from "../components/app/summary-panel.js";
 import { TwoLine } from "../components/app/two-line.js";
 import { Button } from "../components/ui/button.js";
 import {
@@ -27,7 +30,7 @@ import {
 import { Skeleton } from "../components/ui/skeleton.js";
 import type { EntitlementChangeSource } from "../db/types.js";
 import type { EntitlementPatch, OverrideKey } from "../entitlements/catalog.js";
-import type { OperatorConsole } from "./console.js";
+import type { OperatorConsole, OperatorSubscription } from "./console.js";
 import {
   operatorClearOverride,
   operatorOrganizations,
@@ -45,11 +48,26 @@ type OverrideTarget =
   | { kind: "executionsMonthly"; key: OverrideKey; hasOverride: boolean; limit: number | null };
 
 const PICKER_TITLE = "Organization";
-const PICKER_DESCRIPTION = "Pick an organization to manage its entitlements.";
+const MEMBER_COLUMNS: readonly DataColumn[] = [
+  { header: "Member", fill: true },
+  { header: "Role" },
+  { header: "Joined", align: "end" },
+];
+const MEMBERS_EMPTY = { title: "No members" };
+// The labels every organization has are known before it loads; only their values wait.
+const DETAILS_LOADING: readonly SummaryRow[] = ["Name", "ID", "Slug", "Created"].map((label) => ({
+  label,
+  value: <Skeleton className="h-5 w-32" />,
+}));
+const ROLE_LABELS: Record<Snapshot["members"][number]["role"], string> = {
+  owner: "Owner",
+  admin: "Admin",
+  member: "Member",
+};
 const AUDIT_TITLE = "Audit trail";
 const AUDIT_DESCRIPTION = "Every provisioning, plan stamp, and override, most recent first.";
 const ENTITLEMENT_COLUMNS: readonly DataColumn[] = [
-  { header: "Entitlement" },
+  { header: "Entitlement", fill: true },
   { header: "Granted" },
   { header: "Override" },
   { header: "Effective" },
@@ -60,7 +78,7 @@ const ENTITLEMENTS_EMPTY = { title: "No entitlements" };
 const AUDIT_COLUMNS: readonly DataColumn[] = [
   { header: "Change" },
   { header: "Actor" },
-  { header: "Reason" },
+  { header: "Reason", fill: true },
   { header: "When", align: "end" },
 ];
 const AUDIT_EMPTY = {
@@ -95,54 +113,68 @@ function OrganizationPicker({
   onSelect: (slug: string) => void;
 }) {
   const load = useServerFn(operatorOrganizations);
-  const query = useQuery({ queryKey: ["operator", "organizations"], queryFn: () => load() });
+  const query = useSnapshotQuery({
+    queryKey: ["operator", "organizations"],
+    queryFn: () => load(),
+  });
+  const options = useMemo(
+    () =>
+      (query.data ?? []).map((organization) => ({
+        value: organization.slug,
+        label: organization.name,
+        identifier: organization.id,
+        keywords: [organization.name],
+      })),
+    [query.data],
+  );
+  const choose = useCallback((option: { value: string }) => onSelect(option.value), [onSelect]);
 
-  if (query.isPending) return <OrganizationPickerLoading />;
-  if (query.isError || query.data.status === "error") {
+  if (query.status === "pending") return <OrganizationPickerLoading />;
+  if (query.status === "error") {
     return (
       <FailureAlert
         title="Operator console unavailable"
-        error={query.data}
+        error={query.error}
         fallback="Hub did not receive the organization list. Check your connection and reload the page."
       />
     );
   }
   return (
-    <Section title={PICKER_TITLE} description={PICKER_DESCRIPTION}>
-      <Select {...(slug === null ? {} : { value: slug })} onValueChange={onSelect}>
-        <SelectTrigger aria-label="Manage organization" className="w-full max-w-sm">
-          <SelectValue placeholder="Select an organization" />
-        </SelectTrigger>
-        <SelectContent>
-          {query.data.data.map((organization) => (
-            <SelectItem key={organization.id} value={organization.slug}>
-              {organization.name}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+    <Section title={PICKER_TITLE}>
+      <div className="max-w-sm">
+        <Combobox
+          id="operator-organization"
+          label="Organization"
+          value={slug ?? ""}
+          options={options}
+          onChange={choose}
+          placeholder="Select an organization"
+          searchPlaceholder="Search by name or ID…"
+          empty="No organizations found."
+        />
+      </div>
     </Section>
   );
 }
 
 function OperatorOrganization({ slug }: { slug: string }) {
   const load = useServerFn(operatorSnapshot);
-  const query = useQuery({
+  const query = useSnapshotQuery({
     queryKey: ["operator", "snapshot", slug],
     queryFn: () => load({ data: { organizationSlug: slug } }),
   });
 
-  if (query.isPending) return <OperatorOrganizationLoading />;
-  if (query.isError || query.data.status === "error") {
+  if (query.status === "pending") return <OperatorOrganizationLoading />;
+  if (query.status === "error") {
     return (
       <FailureAlert
         title="Entitlements unavailable"
-        error={query.data}
+        error={query.error}
         fallback="Hub did not receive this organization's entitlements. Check your connection and reload the page."
       />
     );
   }
-  return <OrganizationContent snapshot={query.data.data} slug={slug} />;
+  return <OrganizationContent snapshot={query.data} slug={slug} />;
 }
 
 function OrganizationContent({ snapshot, slug }: { snapshot: Snapshot; slug: string }) {
@@ -187,6 +219,12 @@ function OrganizationContent({ snapshot, slug }: { snapshot: Snapshot; slug: str
   return (
     <>
       <OverLimitBanner overages={snapshot.overages} />
+      <Section title="Details">
+        <SummaryPanel label="Organization details" rows={detailRows(snapshot)} />
+      </Section>
+      <Section title="Members">
+        <MemberList members={snapshot.members} />
+      </Section>
       <Section
         title="Entitlements"
         description={`Effective values for ${snapshot.organization.name}, granted by its plan and adjusted by any manual overrides.`}
@@ -205,7 +243,7 @@ function OrganizationContent({ snapshot, slug }: { snapshot: Snapshot; slug: str
             </DataCell>
             <DataCell>{seatLimitLabel(effective.seats.max)}</DataCell>
             <DataCell muted>{snapshot.seatsInUse}</DataCell>
-            <DataCell align="end">
+            <DataCell>
               <Button
                 type="button"
                 variant="outline"
@@ -233,7 +271,7 @@ function OrganizationContent({ snapshot, slug }: { snapshot: Snapshot; slug: str
               <InviteState canInvite={effective.canInviteMembers} />
             </DataCell>
             <DataCell muted>—</DataCell>
-            <DataCell align="end">
+            <DataCell>
               <Button
                 type="button"
                 variant="outline"
@@ -255,7 +293,7 @@ function OrganizationContent({ snapshot, slug }: { snapshot: Snapshot; slug: str
             </DataCell>
             <DataCell>{meterLimitLabel(effectiveExecutionsLimit)}</DataCell>
             <DataCell>{meterUsageLabel(snapshot.usage)}</DataCell>
-            <DataCell align="end">
+            <DataCell>
               <Button
                 type="button"
                 variant="outline"
@@ -443,6 +481,65 @@ function ExecutionsMonthlyControl({ limit }: { limit: number | null }) {
   );
 }
 
+function detailRows(snapshot: Snapshot): SummaryRow[] {
+  const { organization, billing } = snapshot;
+  const rows: SummaryRow[] = [
+    { label: "Name", value: organization.name },
+    { label: "ID", identifier: organization.id },
+    { label: "Slug", identifier: organization.slug },
+    { label: "Created", value: <RelativeTime value={organization.createdAt} /> },
+  ];
+  if (billing === null) return rows;
+  return [
+    ...rows,
+    { label: "Plan", value: billing.planName ?? "No plan" },
+    { label: "Subscription", value: <Subscription subscription={billing.subscription} /> },
+    billing.stripeCustomerId === null
+      ? { label: "Stripe customer", value: "None" }
+      : { label: "Stripe customer", identifier: billing.stripeCustomerId },
+  ];
+}
+
+function Subscription({ subscription }: { subscription: OperatorSubscription }) {
+  if (subscription.kind === "unavailable") return "Unavailable";
+  if (subscription.status === null) return "None";
+  const status = statusLabel(subscription.status);
+  if (subscription.currentPeriodEnd === null) return status;
+  return (
+    <>
+      {`${status} · ${subscription.cancelAtPeriodEnd ? "cancels" : "renews"} `}
+      <RelativeTime value={subscription.currentPeriodEnd} />
+    </>
+  );
+}
+
+function MemberList({ members }: { members: Snapshot["members"] }) {
+  return (
+    <DataTable
+      label="Members"
+      columns={MEMBER_COLUMNS}
+      isEmpty={members.length === 0}
+      empty={MEMBERS_EMPTY}
+    >
+      {members.map((member) => (
+        <DataRow key={member.id}>
+          <DataCell>
+            <TwoLine primary={member.name} secondary={member.email} />
+          </DataCell>
+          <DataCell>
+            <StatusPill tone="neutral" dot={false}>
+              {ROLE_LABELS[member.role]}
+            </StatusPill>
+          </DataCell>
+          <DataCell muted>
+            <RelativeTime value={member.joinedAt} />
+          </DataCell>
+        </DataRow>
+      ))}
+    </DataTable>
+  );
+}
+
 function AuditTrail({ history }: { history: Snapshot["history"] }) {
   return (
     <DataTable
@@ -460,12 +557,8 @@ function AuditTrail({ history }: { history: Snapshot["history"] }) {
             />
           </DataCell>
           <DataCell muted>{entry.actorName ?? "System"}</DataCell>
-          <DataCell muted className="max-w-xs">
-            <span className="block truncate" title={entry.reason ?? undefined}>
-              {entry.reason ?? "—"}
-            </span>
-          </DataCell>
-          <DataCell align="end" muted>
+          <DataCell muted>{entry.reason ?? "—"}</DataCell>
+          <DataCell muted>
             <RelativeTime value={entry.createdAt} />
           </DataCell>
         </DataRow>
@@ -525,8 +618,8 @@ function meterUsageLabel(usage: Snapshot["usage"]): string {
 
 function OrganizationPickerLoading() {
   return (
-    <Section title={PICKER_TITLE} description={PICKER_DESCRIPTION}>
-      <Skeleton aria-busy="true" className="h-9 w-full max-w-sm" />
+    <Section title={PICKER_TITLE}>
+      <Skeleton aria-busy="true" className="h-8 w-full max-w-sm" />
     </Section>
   );
 }
@@ -534,6 +627,14 @@ function OrganizationPickerLoading() {
 function OperatorOrganizationLoading() {
   return (
     <>
+      <Section title="Details">
+        <div aria-busy="true">
+          <SummaryPanel label="Organization details" rows={DETAILS_LOADING} />
+        </div>
+      </Section>
+      <Section title="Members">
+        <DataTableSkeleton label="Members" columns={MEMBER_COLUMNS} rows={2} />
+      </Section>
       <Section title="Entitlements">
         <DataTableSkeleton label="Entitlements" columns={ENTITLEMENT_COLUMNS} />
       </Section>

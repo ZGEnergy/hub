@@ -95,6 +95,7 @@ describe("durable Hub action acknowledgement state", () => {
         prompt: "Full prompt ".repeat(100),
         allowOutputs: [],
         autoArchive: false,
+        background: false,
         triggerContext: {},
         outputContext: {},
         configurationRevisionId: "revision-reconnect",
@@ -423,7 +424,6 @@ async function acknowledgementFixture() {
       provider: "codex",
       cwd: "/workspace",
       env: {},
-      toolPolicy: { preapproved: [] },
     },
   });
   await database.attachExecutionToSession(EXECUTION_ID, "session");

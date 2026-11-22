@@ -1,5 +1,6 @@
 /* oxlint-disable eslint-plugin-react-perf/jsx-no-new-array-as-prop, eslint-plugin-react-perf/jsx-no-new-function-as-prop, eslint-plugin-react-perf/jsx-no-new-object-as-prop, eslint-plugin-react-perf/jsx-no-jsx-as-prop, typescript-eslint/no-unsafe-type-assertion -- route links and mutation controls are intentionally scoped to each rendered tenant snapshot */
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSnapshotQuery } from "../queries/index.js";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { type FormEvent, type ReactNode } from "react";
@@ -49,14 +50,14 @@ import {
   type ProjectSnapshot,
 } from "./panel-state.js";
 import { archiveProject, activityRunSnapshot, updateProjectSlug } from "./functions.js";
-const CONNECTIONS_DESCRIPTION = "Organization provider connections.";
+const INTEGRATIONS_DESCRIPTION = "Where this organization's events come from.";
 const CONNECTION_PROVIDERS = ["github", "discord", "slack", "linear"] as const;
 type ConnectionProviderName = (typeof CONNECTION_PROVIDERS)[number];
 
-function ConnectionsLoading() {
+function IntegrationsLoading() {
   return (
     <>
-      <PageHeader title="Connections" description={CONNECTIONS_DESCRIPTION} />
+      <PageHeader title="Integrations" description={INTEGRATIONS_DESCRIPTION} />
       <Section>
         {CONNECTION_PROVIDERS.map((provider) => (
           <CardSkeleton key={provider} lines={2} />
@@ -66,14 +67,14 @@ function ConnectionsLoading() {
   );
 }
 
-export function OrganizationConnectionsPanel() {
+export function OrganizationIntegrationsPanel() {
   const tenant = useRouteTenant();
   const { isInstanceOperator } = useActiveAccount();
   const queryClient = useQueryClient();
   const scope = { organizationSlug: tenant.organization.slug };
-  const snapshot = useOrganizationSnapshot(<ConnectionsLoading />);
+  const snapshot = useOrganizationSnapshot(<IntegrationsLoading />);
   const loadStatus = useServerFn(connectionStatus);
-  const statusQuery = useQuery({
+  const statusQuery = useSnapshotQuery({
     queryKey: ["connection-status", tenant.account.id, tenant.organization.id],
     queryFn: () => loadStatus({ data: scope }),
   });
@@ -101,8 +102,8 @@ export function OrganizationConnectionsPanel() {
   if (!snapshot.ok) return snapshot.element;
   const status = queryState<ConnectionStatus>(
     statusQuery,
-    "Connections unavailable",
-    <ConnectionsLoading />,
+    "Integrations unavailable",
+    <IntegrationsLoading />,
   );
   if (!status.ok) return status.element;
   const data = snapshot.data;
@@ -172,14 +173,14 @@ export function OrganizationConnectionsPanel() {
     : "An organization owner connects the providers this organization can use.";
   return (
     <>
-      <PageHeader title="Connections" description={CONNECTIONS_DESCRIPTION} />
+      <PageHeader title="Integrations" description={INTEGRATIONS_DESCRIPTION} />
       {returned === undefined ? null : (
         <ConnectionReturnBanner copy={connectionReturnCopy(returned)} />
       )}
       <CommandError mutations={[connect, disconnect]} />
       <Section>
         {shown.length === 0 ? (
-          <EmptyState title="No connections" description={nothingToConnect} />
+          <EmptyState title="No integrations" description={nothingToConnect} />
         ) : (
           shown.map(({ provider, connections, action }) => (
             <ProviderConnections
@@ -310,7 +311,7 @@ export function ProjectOverviewPanel() {
           }
         />
         <SetupCard
-          label="Connections"
+          label="Integrations"
           ready={
             data.connections.github.length +
               data.connections.discord.length +
@@ -365,7 +366,7 @@ export function ProjectActivityRunPanel({ runId }: { runId: string }) {
     projectSlug: tenant.project?.slug ?? "",
     runId,
   };
-  const query = useQuery({
+  const query = useSnapshotQuery({
     queryKey: ["project-activity-run", tenant.account.id, tenant.organization.id, runId],
     queryFn: () => load({ data: scope }),
   });
@@ -388,12 +389,12 @@ export function ProjectActivityRunPanel({ runId }: { runId: string }) {
         <DataTable
           label="Run steps"
           columns={[
-            { header: "Step" },
+            { header: "Step", fill: true },
             { header: "Status" },
             { header: "Deadline" },
             { header: "Agent" },
             { header: "Structured output" },
-            { header: "Failure reason" },
+            { header: "Failure reason", fill: true },
           ]}
           isEmpty={activity.steps.length === 0}
           empty={{ title: "No steps" }}
@@ -574,7 +575,7 @@ function invocationRows(activity: RunActivity): readonly SummaryRow[] {
       ),
     },
     { label: "Failure reason", value: activity.failureReason ?? "—" },
-    { label: "Delivery", value: <span className="font-mono text-xs">{activity.deliveryId}</span> },
+    { label: "Delivery", identifier: activity.deliveryId },
   ];
 }
 
@@ -607,11 +608,11 @@ function ActivityTable({
     <DataTable
       label={label}
       columns={[
-        { header: "Run" },
+        { header: "Run", fill: true },
         { header: "Provider" },
         { header: "Source" },
         { header: "Status" },
-        ...(showReason ? [{ header: "Reason" }] : []),
+        ...(showReason ? [{ header: "Reason", fill: true }] : []),
         { header: "Received" },
       ]}
       isEmpty={activity.length === 0}

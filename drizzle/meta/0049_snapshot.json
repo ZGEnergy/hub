@@ -1,5 +1,5 @@
 {
-  "id": "afb87155-6aef-4289-bbc7-3c55c06de164",
+  "id": "bc467c07-9429-446d-8161-3d59b0a32c79",
   "prevId": "5d38ccc3-86d8-40ad-8f9c-9d1c04669de2",
   "version": "7",
   "dialect": "postgresql",
@@ -1237,584 +1237,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.connector_agents": {
-      "name": "connector_agents",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "connection_id": {
-          "name": "connection_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "owner_user_id": {
-          "name": "owner_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "daemon_id": {
-          "name": "daemon_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agent_id": {
-          "name": "agent_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "workspace_id": {
-          "name": "workspace_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "launch_operation_id": {
-          "name": "launch_operation_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {
-        "connector_agents_daemon_agent_unique": {
-          "name": "connector_agents_daemon_agent_unique",
-          "columns": [
-            {
-              "expression": "daemon_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "agent_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "connector_agents_launch_operation_unique": {
-          "name": "connector_agents_launch_operation_unique",
-          "columns": [
-            {
-              "expression": "launch_operation_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "connector_agents_connection_idx": {
-          "name": "connector_agents_connection_idx",
-          "columns": [
-            {
-              "expression": "connection_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "connector_agents_connection_identity_fk": {
-          "name": "connector_agents_connection_identity_fk",
-          "tableFrom": "connector_agents",
-          "tableTo": "connector_connections",
-          "columnsFrom": ["connection_id", "owner_user_id", "organization_id", "daemon_id"],
-          "columnsTo": ["id", "owner_user_id", "organization_id", "daemon_id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "connector_agents_operation_identity_fk": {
-          "name": "connector_agents_operation_identity_fk",
-          "tableFrom": "connector_agents",
-          "tableTo": "connector_operations",
-          "columnsFrom": [
-            "launch_operation_id",
-            "connection_id",
-            "owner_user_id",
-            "organization_id",
-            "daemon_id"
-          ],
-          "columnsTo": ["id", "connection_id", "owner_user_id", "organization_id", "daemon_id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "connector_agents_daemon_organization_fk": {
-          "name": "connector_agents_daemon_organization_fk",
-          "tableFrom": "connector_agents",
-          "tableTo": "daemons",
-          "columnsFrom": ["daemon_id", "organization_id"],
-          "columnsTo": ["id", "organization_id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.connector_connections": {
-      "name": "connector_connections",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "owner_user_id": {
-          "name": "owner_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "daemon_id": {
-          "name": "daemon_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "working_directory": {
-          "name": "working_directory",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "scopes": {
-          "name": "scopes",
-          "type": "text[]",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "activated_at": {
-          "name": "activated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "revoked_at": {
-          "name": "revoked_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "connector_connections_owner_created_idx": {
-          "name": "connector_connections_owner_created_idx",
-          "columns": [
-            {
-              "expression": "owner_user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": false,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "connector_connections_daemon_idx": {
-          "name": "connector_connections_daemon_idx",
-          "columns": [
-            {
-              "expression": "daemon_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "organization_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "connector_connections_owner_user_id_user_id_fk": {
-          "name": "connector_connections_owner_user_id_user_id_fk",
-          "tableFrom": "connector_connections",
-          "tableTo": "user",
-          "columnsFrom": ["owner_user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "connector_connections_organization_id_organization_id_fk": {
-          "name": "connector_connections_organization_id_organization_id_fk",
-          "tableFrom": "connector_connections",
-          "tableTo": "organization",
-          "columnsFrom": ["organization_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "connector_connections_daemon_organization_fk": {
-          "name": "connector_connections_daemon_organization_fk",
-          "tableFrom": "connector_connections",
-          "tableTo": "daemons",
-          "columnsFrom": ["daemon_id", "organization_id"],
-          "columnsTo": ["id", "organization_id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "connector_connections_identity_unique": {
-          "name": "connector_connections_identity_unique",
-          "nullsNotDistinct": false,
-          "columns": ["id", "owner_user_id", "organization_id", "daemon_id"]
-        },
-        "connector_connections_id_owner_unique": {
-          "name": "connector_connections_id_owner_unique",
-          "nullsNotDistinct": false,
-          "columns": ["id", "owner_user_id"]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {
-        "connector_connections_scopes_check": {
-          "name": "connector_connections_scopes_check",
-          "value": "\"connector_connections\".\"scopes\" <@ ARRAY['paseo:read', 'paseo:run', 'paseo:cancel']::text[] and cardinality(\"connector_connections\".\"scopes\") > 0"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.connector_consent_flows": {
-      "name": "connector_consent_flows",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "session_id": {
-          "name": "session_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "owner_user_id": {
-          "name": "owner_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "authorization_fingerprint": {
-          "name": "authorization_fingerprint",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "connection_id": {
-          "name": "connection_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "consumed_at": {
-          "name": "consumed_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "connector_consent_flows_owner_session_idx": {
-          "name": "connector_consent_flows_owner_session_idx",
-          "columns": [
-            {
-              "expression": "owner_user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "session_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "connector_consent_flows_connection_idx": {
-          "name": "connector_consent_flows_connection_idx",
-          "columns": [
-            {
-              "expression": "connection_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "connector_consent_flows_owner_user_id_user_id_fk": {
-          "name": "connector_consent_flows_owner_user_id_user_id_fk",
-          "tableFrom": "connector_consent_flows",
-          "tableTo": "user",
-          "columnsFrom": ["owner_user_id"],
-          "columnsTo": ["id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "connector_consent_flows_connection_owner_fk": {
-          "name": "connector_consent_flows_connection_owner_fk",
-          "tableFrom": "connector_consent_flows",
-          "tableTo": "connector_connections",
-          "columnsFrom": ["connection_id", "owner_user_id"],
-          "columnsTo": ["id", "owner_user_id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.connector_operations": {
-      "name": "connector_operations",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "connection_id": {
-          "name": "connection_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "owner_user_id": {
-          "name": "owner_user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "organization_id": {
-          "name": "organization_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "daemon_id": {
-          "name": "daemon_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "request_key": {
-          "name": "request_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "request_fingerprint": {
-          "name": "request_fingerprint",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "creation_key": {
-          "name": "creation_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "message_id": {
-          "name": "message_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "agent_id": {
-          "name": "agent_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "workspace_id": {
-          "name": "workspace_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "error_code": {
-          "name": "error_code",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "connector_operations_connection_request_key_unique": {
-          "name": "connector_operations_connection_request_key_unique",
-          "columns": [
-            {
-              "expression": "connection_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "request_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "connector_operations_connection_identity_fk": {
-          "name": "connector_operations_connection_identity_fk",
-          "tableFrom": "connector_operations",
-          "tableTo": "connector_connections",
-          "columnsFrom": ["connection_id", "owner_user_id", "organization_id", "daemon_id"],
-          "columnsTo": ["id", "owner_user_id", "organization_id", "daemon_id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "connector_operations_daemon_organization_fk": {
-          "name": "connector_operations_daemon_organization_fk",
-          "tableFrom": "connector_operations",
-          "tableTo": "daemons",
-          "columnsFrom": ["daemon_id", "organization_id"],
-          "columnsTo": ["id", "organization_id"],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "connector_operations_identity_unique": {
-          "name": "connector_operations_identity_unique",
-          "nullsNotDistinct": false,
-          "columns": ["id", "connection_id", "owner_user_id", "organization_id", "daemon_id"]
-        }
-      },
-      "policies": {},
-      "checkConstraints": {
-        "connector_operations_kind_check": {
-          "name": "connector_operations_kind_check",
-          "value": "\"connector_operations\".\"kind\" in ('launch', 'message')"
-        },
-        "connector_operations_state_check": {
-          "name": "connector_operations_state_check",
-          "value": "\"connector_operations\".\"state\" in ('creating', 'created', 'accepted', 'failed', 'outcome_unknown')"
-        }
-      },
-      "isRLSEnabled": false
-    },
     "public.daemon_enrollment_tokens": {
       "name": "daemon_enrollment_tokens",
       "schema": "",
@@ -2625,6 +2047,121 @@
         "github_connections_status_check": {
           "name": "github_connections_status_check",
           "value": "\"github_connections\".\"status\" in ('active', 'suspended')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.github_installation_syncs": {
+      "name": "github_installation_syncs",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "provider_application_id": {
+          "name": "provider_application_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "installation_id": {
+          "name": "installation_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "connection_id": {
+          "name": "connection_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "delivery_id": {
+          "name": "delivery_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "signature_hash": {
+          "name": "signature_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "payload": {
+          "name": "payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "received_at": {
+          "name": "received_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "retry_at": {
+          "name": "retry_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "github_installation_syncs_pending_idx": {
+          "name": "github_installation_syncs_pending_idx",
+          "columns": [
+            {
+              "expression": "retry_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"github_installation_syncs\".\"retry_at\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "github_installation_syncs_delivery_id_unique": {
+          "name": "github_installation_syncs_delivery_id_unique",
+          "nullsNotDistinct": false,
+          "columns": ["delivery_id"]
+        },
+        "github_installation_syncs_signature_hash_unique": {
+          "name": "github_installation_syncs_signature_hash_unique",
+          "nullsNotDistinct": false,
+          "columns": ["signature_hash"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "github_installation_syncs_evidence_check": {
+          "name": "github_installation_syncs_evidence_check",
+          "value": "(\n    \"github_installation_syncs\".\"kind\" = 'webhook' AND \"github_installation_syncs\".\"provider_application_id\" IS NOT NULL AND \"github_installation_syncs\".\"delivery_id\" IS NOT NULL AND \"github_installation_syncs\".\"signature_hash\" IS NOT NULL\n    AND \"github_installation_syncs\".\"source\" IS NOT NULL AND \"github_installation_syncs\".\"source\" IN ('github.installation', 'github.installation_repositories') AND \"github_installation_syncs\".\"payload\" IS NOT NULL\n  ) OR (\n    \"github_installation_syncs\".\"kind\" = 'reconcile' AND \"github_installation_syncs\".\"connection_id\" IS NOT NULL AND \"github_installation_syncs\".\"delivery_id\" IS NULL\n    AND \"github_installation_syncs\".\"signature_hash\" IS NULL AND \"github_installation_syncs\".\"source\" IS NULL AND \"github_installation_syncs\".\"payload\" IS NULL\n  )"
         }
       },
       "isRLSEnabled": false

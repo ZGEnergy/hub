@@ -14,7 +14,7 @@ export type WorkflowDeadlineKind = "step_hard" | "step_idle" | "whole_run";
 export interface ProviderEventReceiptRecord {
   id: string;
   organizationId: string;
-  provider: "github" | "slack" | "discord" | "linear" | "manual" | "schedule";
+  provider: "github" | "slack" | "discord" | "linear" | "manual" | "schedule" | "webhook";
   connectionId: string | null;
   resourceId: string | null;
   deliveryId: string;
@@ -46,6 +46,7 @@ export interface ProviderEventReceiptSummary {
 /** One run as an organization overview reads it: what fired, what happened, and which agent ran. */
 export interface OrganizationRunRecord {
   id: string;
+  /** The trigger's name as the user wrote it, never the internal name of one of its events. */
   triggerName: string;
   provider: ProviderEventReceiptRecord["provider"];
   source: string;
@@ -379,6 +380,7 @@ export type ConnectionProvider = "github" | "discord" | "slack" | "linear";
 export type ConnectionAttemptPhase =
   | "github_setup"
   | "github_user_authorization"
+  | "github_selection"
   | "discord_authorization"
   | "slack_authorization"
   | "linear_authorization";
@@ -404,6 +406,8 @@ export interface ConnectionAttemptRecord {
   sessionId: string;
   candidateExternalId: string | null;
   pkceVerifier: string | null;
+  /** The GitHub accounts offered in `github_selection`, as the GitHub module stored them. */
+  installationChoices: unknown;
   configurationVersion: number;
   providerApplicationId: string | null;
   callbackOrigin: string;
@@ -473,6 +477,8 @@ export interface StartConnectionAttemptInput {
   provider: ConnectionProvider;
   stateVerifier: string;
   access: ConnectionStartAuthority;
+  /** Set when the attempt opens with a PKCE authorization, as GitHub's does. */
+  pkceVerifier?: string;
   lifetimeMinutes: number;
   configurationVersion: number;
   providerApplicationId: string;
@@ -488,13 +494,27 @@ export interface ReadConnectionAttemptInput {
   access: ConnectionAccountAccess;
 }
 
+/** Where a GitHub attempt goes next. Every step issues a new state, so an old link stops working. */
+export type GitHubConnectionAttemptStep =
+  /** Off to GitHub's install page. */
+  | { phase: "github_setup" }
+  /** Off to GitHub's authorize page, with the installation GitHub just reported, if any. */
+  | { phase: "github_user_authorization"; installationId: number | null; pkceVerifier: string }
+  /** On Hub's chooser, offering the accounts verified for this person. */
+  | { phase: "github_selection"; installationChoices: unknown };
+
 export interface AdvanceGitHubConnectionAttemptInput extends ReadConnectionAttemptInput {
   nextStateVerifier: string;
-  installationId: number;
-  pkceVerifier: string;
+  next: GitHubConnectionAttemptStep;
 }
 
+export type GitHubRepositorySnapshot = Pick<
+  GitHubRepositoryRecord,
+  "repositoryId" | "fullName" | "defaultBranch"
+>[];
+
 export interface BindGitHubConnectionInput extends ReadConnectionAttemptInput {
+  repositories: GitHubRepositorySnapshot;
   providerApplicationId: string;
   installationId: number;
   accountId: string;
@@ -660,7 +680,13 @@ export type ManualEventPersistence =
   | { status: "accepted"; event: DurableProviderEvent }
   | { status: "duplicate"; providerEventReceiptId: string };
 
+export interface GitHubInstallationSyncOwner {
+  providerApplicationId: string;
+  configurationVersion: number;
+}
+
 export interface GitHubLifecycleReceiptClaimInput {
+  providerApplicationId: string;
   installationId: number;
   deliveryId: string;
   signatureHash: string;
@@ -669,13 +695,17 @@ export interface GitHubLifecycleReceiptClaimInput {
   receivedAt: Date;
 }
 
-export type GitHubLifecycleReceiptClaim =
-  | { status: "claimed"; providerEventReceiptId: string; installationId: number }
-  | { status: "duplicate"; providerEventReceiptId: string };
+export type GitHubInstallationSyncClaim =
+  | { status: "claimed"; installationSyncId: string; installationId: number }
+  | { status: "duplicate"; installationSyncId: string };
 
-export type GitHubLifecycleResult =
+export type GitHubInstallationSyncResult =
   | { status: "absent"; removeBinding: boolean }
-  | { status: "present"; identity: GitHubLifecycleIdentity };
+  | {
+      status: "present";
+      identity: GitHubLifecycleIdentity;
+      repositories: GitHubRepositorySnapshot;
+    };
 
 export interface InsertMachineInput {
   orgId: string;
@@ -897,6 +927,18 @@ export interface OperatorOrganizationRecord {
   id: string;
   name: string;
   slug: string;
+  createdAt: Date;
+}
+
+/** A member of an organization as the instance-operator surface sees it, for telling apart
+ * organizations that share a name. */
+export interface OperatorMemberRecord {
+  id: string;
+  userId: string;
+  name: string;
+  email: string;
+  role: "owner" | "admin" | "member";
+  joinedAt: Date;
 }
 
 export interface StampOrganizationEntitlementsInput {
@@ -1182,6 +1224,7 @@ export interface TerminateMachineFields {
 export interface Database {
   readonly connector: import("../paseo-connector/contracts.js").ConnectorStore;
   readonly executionAuthority: import("../execution-authority/index.js").ExecutionAuthorityStore;
+  readonly webhooks: import("../triggers/webhook/index.js").WebhookStore;
   readonly schedules: import("../triggers/schedule/index.js").ScheduleStore;
   findAgentSessionByKey(
     projectId: string,
@@ -1291,14 +1334,24 @@ export interface Database {
   acceptSlackEvent(input: AcceptSlackEventInput): Promise<ProviderEventAcceptance>;
   acceptLinearEvent(input: AcceptLinearEventInput): Promise<ProviderEventAcceptance>;
   persistManualEvent(input: PersistManualEventInput): Promise<ManualEventPersistence>;
+  synchronizeGitHubInstallation<T>(installationId: number, operation: () => Promise<T>): Promise<T>;
+  pendingGitHubInstallationSyncs(
+    owner: GitHubInstallationSyncOwner,
+  ): Promise<
+    Array<Extract<GitHubInstallationSyncClaim, { status: "claimed" }> & { removeBinding: boolean }>
+  >;
   claimGitHubLifecycleReceipt(
     input: GitHubLifecycleReceiptClaimInput,
-  ): Promise<GitHubLifecycleReceiptClaim>;
-  applyGitHubLifecycle(
-    claim: Extract<GitHubLifecycleReceiptClaim, { status: "claimed" }>,
-    result: GitHubLifecycleResult,
+  ): Promise<GitHubInstallationSyncClaim>;
+  applyGitHubInstallationSync(
+    owner: GitHubInstallationSyncOwner,
+    claim: Extract<GitHubInstallationSyncClaim, { status: "claimed" }>,
+    result: GitHubInstallationSyncResult,
   ): Promise<void>;
-  releaseGitHubLifecycleReceipt(providerEventReceiptId: string): Promise<void>;
+  retryGitHubInstallationSync(
+    owner: GitHubInstallationSyncOwner,
+    installationSyncId: string,
+  ): Promise<void>;
   findProviderEventReceiptByDeliveryId(
     deliveryId: string,
     organizationId?: string,
@@ -1455,6 +1508,11 @@ export interface Database {
    * the operator flag at the caller. Undefined when no organization has that slug.
    */
   findOrganizationForOperator(slug: string): Promise<OperatorOrganizationRecord | undefined>;
+  /**
+   * An organization's members, owners first, without any membership check on the caller. The
+   * operator support path; gate on the operator flag at the caller.
+   */
+  listOrganizationMembersForOperator(organizationId: string): Promise<OperatorMemberRecord[]>;
   findOrganizationSlugById(organizationId: string): Promise<string | undefined>;
   /**
    * Single atomic conditional upsert: increments `used` by `amount` and returns the new
@@ -1569,13 +1627,6 @@ export interface Database {
     organizationId: string,
     fullName: string,
   ): Promise<GitHubRepositoryRecord | undefined>;
-  upsertGitHubRepositories(
-    organizationId: string,
-    connectionId: string,
-    repositories: Array<
-      Pick<GitHubRepositoryRecord, "repositoryId" | "fullName" | "defaultBranch">
-    >,
-  ): Promise<void>;
   findGitHubConfigurationTarget(
     projectId: string,
     repositoryId?: number,

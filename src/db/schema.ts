@@ -51,7 +51,7 @@ export const providerEventReceipts = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
     provider: text()
-      .$type<(typeof CONNECTION_PROVIDERS)[number] | "manual" | "schedule">()
+      .$type<(typeof CONNECTION_PROVIDERS)[number] | "manual" | "schedule" | "webhook">()
       .notNull(),
     connectionId: uuid("connection_id"),
     resourceId: text("resource_id"),
@@ -90,7 +90,7 @@ export const providerEventReceipts = pgTable(
     ),
     check(
       "provider_event_receipts_provider_check",
-      sql`${table.provider} in ('github', 'slack', 'discord', 'linear', 'manual', 'schedule')`,
+      sql`${table.provider} in ('github', 'slack', 'discord', 'linear', 'manual', 'schedule', 'webhook')`,
     ),
   ],
 );
@@ -868,6 +868,7 @@ export const organizationConnectionAttempts = pgTable(
       .$type<
         | "github_setup"
         | "github_user_authorization"
+        | "github_selection"
         | "discord_authorization"
         | "slack_authorization"
         | "linear_authorization"
@@ -886,6 +887,7 @@ export const organizationConnectionAttempts = pgTable(
       .references(() => sessions.id, { onDelete: "cascade" }),
     candidateExternalId: text("candidate_external_id"),
     pkceVerifier: text("pkce_verifier"),
+    installationChoices: jsonb("installation_choices"),
     configurationVersion: integer("configuration_version").notNull(),
     providerApplicationId: text("provider_application_id"),
     callbackOrigin: text("callback_origin").notNull(),
@@ -904,15 +906,16 @@ export const organizationConnectionAttempts = pgTable(
     ),
     check(
       "organization_connection_attempts_phase_check",
-      sql`${table.phase} in ('github_setup', 'github_user_authorization', 'discord_authorization', 'slack_authorization', 'linear_authorization')`,
+      sql`${table.phase} in ('github_setup', 'github_user_authorization', 'github_selection', 'discord_authorization', 'slack_authorization', 'linear_authorization')`,
     ),
     check(
       "organization_connection_attempts_shape_check",
-      sql`(${table.phase} = 'github_setup' and ${table.provider} = 'github' and ${table.candidateExternalId} is null and ${table.pkceVerifier} is null)
-        or (${table.phase} = 'github_user_authorization' and ${table.provider} = 'github' and ${table.candidateExternalId} is not null and (${table.pkceVerifier} is not null or ${table.consumedAt} is not null))
-        or (${table.phase} = 'discord_authorization' and ${table.provider} = 'discord' and ${table.candidateExternalId} is null and ${table.pkceVerifier} is null)
-        or (${table.phase} = 'slack_authorization' and ${table.provider} = 'slack' and ${table.candidateExternalId} is null and ${table.pkceVerifier} is null)
-        or (${table.phase} = 'linear_authorization' and ${table.provider} = 'linear' and ${table.candidateExternalId} is null and ${table.pkceVerifier} is null)`,
+      sql`(${table.phase} = 'github_setup' and ${table.provider} = 'github' and ${table.candidateExternalId} is null and ${table.pkceVerifier} is null and ${table.installationChoices} is null)
+        or (${table.phase} = 'github_user_authorization' and ${table.provider} = 'github' and (${table.pkceVerifier} is not null or ${table.consumedAt} is not null) and ${table.installationChoices} is null)
+        or (${table.phase} = 'github_selection' and ${table.provider} = 'github' and ${table.candidateExternalId} is null and ${table.pkceVerifier} is null and ${table.installationChoices} is not null)
+        or (${table.phase} = 'discord_authorization' and ${table.provider} = 'discord' and ${table.candidateExternalId} is null and ${table.pkceVerifier} is null and ${table.installationChoices} is null)
+        or (${table.phase} = 'slack_authorization' and ${table.provider} = 'slack' and ${table.candidateExternalId} is null and ${table.pkceVerifier} is null and ${table.installationChoices} is null)
+        or (${table.phase} = 'linear_authorization' and ${table.provider} = 'linear' and ${table.candidateExternalId} is null and ${table.pkceVerifier} is null and ${table.installationChoices} is null)`,
     ),
   ],
 );
@@ -944,6 +947,39 @@ export const githubConnections = pgTable(
     uniqueIndex("github_connections_id_organization_unique").on(table.id, table.organizationId),
     index("github_connections_organization_idx").on(table.organizationId),
     check("github_connections_status_check", sql`${table.status} in ('active', 'suspended')`),
+  ],
+);
+
+export const githubInstallationSyncs = pgTable(
+  "github_installation_syncs",
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    kind: text().$type<"webhook" | "reconcile">().notNull(),
+    providerApplicationId: text("provider_application_id"),
+    installationId: bigint("installation_id", { mode: "number" }).notNull(),
+    // Preserve the original binding after disconnect; work must not follow its replacement.
+    connectionId: uuid("connection_id"),
+    deliveryId: text("delivery_id").unique(),
+    signatureHash: text("signature_hash").unique(),
+    source: text(),
+    payload: jsonb(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).defaultNow().notNull(),
+    retryAt: timestamp("retry_at", { withTimezone: true }).defaultNow(),
+  },
+  (table) => [
+    index("github_installation_syncs_pending_idx")
+      .on(table.retryAt)
+      .where(sql`${table.retryAt} is not null`),
+    check(
+      "github_installation_syncs_evidence_check",
+      sql`(
+    ${table.kind} = 'webhook' AND ${table.providerApplicationId} IS NOT NULL AND ${table.deliveryId} IS NOT NULL AND ${table.signatureHash} IS NOT NULL
+    AND ${table.source} IS NOT NULL AND ${table.source} IN ('github.installation', 'github.installation_repositories') AND ${table.payload} IS NOT NULL
+  ) OR (
+    ${table.kind} = 'reconcile' AND ${table.connectionId} IS NOT NULL AND ${table.deliveryId} IS NULL
+    AND ${table.signatureHash} IS NULL AND ${table.source} IS NULL AND ${table.payload} IS NULL
+  )`,
+    ),
   ],
 );
 
@@ -1438,6 +1474,16 @@ export const triggerSchedules = pgTable(
   },
   (table) => [index("trigger_schedules_due_idx").on(table.nextAt)],
 );
+
+export const triggerWebhooks = pgTable("trigger_webhooks", {
+  triggerId: uuid("trigger_id")
+    .primaryKey()
+    .references(() => organizationTriggers.id, { onDelete: "cascade" }),
+  endpointId: text("endpoint_id").notNull().unique(),
+  secretHash: text("secret_hash"),
+  windowStartedAt: timestamp("window_started_at", { withTimezone: true }),
+  windowCount: integer("window_count").notNull().default(0),
+});
 
 export const executionAuthorities = pgTable("execution_authorities", {
   executionId: uuid("execution_id")

@@ -1,6 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { Navigate } from "@tanstack/react-router";
+import { parseExecutionLinkId } from "../agent-executions/link.js";
+import { useSnapshotQuery } from "../queries/index.js";
 import { useServerFn } from "@tanstack/react-start";
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import type { AccountState } from "./organization-contract.js";
 import { accountState } from "./functions.js";
 import { DaemonHandoffEntry } from "../daemons/handoff.js";
 import {
@@ -32,25 +35,26 @@ function AccountApplication() {
   const [handoff, setHandoff] = useState(false);
   const enterHandoff = useCallback(() => setHandoff(true), []);
   const leaveHandoff = useCallback(() => setHandoff(false), []);
+  const search =
+    typeof window === "undefined" ? undefined : new URLSearchParams(window.location.search);
   const oauthRequest = readConnectorAuthenticationRequest();
-  const invitation = readAccountInvitation(oauthRequest !== undefined);
-  const account = useQuery({
+  const invitation = readAccountInvitation(search, oauthRequest !== undefined);
+  const account = useSnapshotQuery({
     queryKey: ["account", invitation],
     queryFn: () => loadAccount({ data: invitation === undefined ? {} : { invitation } }),
   });
-  if (account.isPending) return <LoadingEntry />;
-  if (account.isError || account.data.status === "error") {
+  if (account.status === "pending") return <LoadingEntry />;
+  if (account.status === "error") {
     return (
       <FailedEntry
         message={
-          account.data?.status === "error"
-            ? account.data.error.message
-            : "Hub did not receive your account state. Check your connection and reload the page."
+          account.error ??
+          "Hub did not receive your account state. Check your connection and reload the page."
         }
       />
     );
   }
-  const state = account.data.data;
+  const state = account.data;
   if (handoff && (state.status === "appSetupRequired" || state.status === "active")) {
     return (
       <DaemonHandoffEntry
@@ -67,6 +71,8 @@ function AccountApplication() {
   if (oauthRequest?.prompt !== undefined && state.status !== "signedOut") {
     return <ConnectorAuthenticationEntry invitation={invitation} />;
   }
+  const execution = resumeExecution(state, search);
+  if (execution !== undefined) return execution;
   if (state.status === "appSetupRequired") {
     return <AppSetupEntry organizationId={state.organization.id} onLeft={enterHandoff} />;
   }
@@ -81,9 +87,12 @@ function AccountApplication() {
   return <DashboardShell account={state} />;
 }
 
-function readAccountInvitation(connectorRequest: boolean): string | undefined {
-  if (typeof window === "undefined") return undefined;
-  const invitation = new URLSearchParams(window.location.search).get("invitation");
+function readAccountInvitation(
+  search: URLSearchParams | undefined,
+  connectorRequest: boolean,
+): string | undefined {
+  if (search === undefined) return undefined;
+  const invitation = search.get("invitation");
   if (invitation !== null) return invitation;
   if (!connectorRequest) return undefined;
   return new URLSearchParams(window.location.hash.slice(1)).get("invitation") ?? undefined;
@@ -91,18 +100,18 @@ function readAccountInvitation(connectorRequest: boolean): string | undefined {
 
 function ConnectorAuthenticationEntry({ invitation }: { invitation: string | undefined }) {
   const loadAccount = useServerFn(accountState);
-  const authentication = useQuery({
+  const authentication = useSnapshotQuery({
     queryKey: ["account", "connector-authentication", invitation],
     queryFn: () =>
       loadAccount({
         data: { authenticationView: true, ...(invitation === undefined ? {} : { invitation }) },
       }),
   });
-  if (authentication.isPending) return <LoadingEntry />;
-  if (authentication.isError || authentication.data.status === "error") {
+  if (authentication.status === "pending") return <LoadingEntry />;
+  if (authentication.status === "error") {
     return <FailedEntry message="Hub couldn't load the authentication policy. Reload the page." />;
   }
-  const entry = authentication.data.data;
+  const entry = authentication.data;
   if (entry.status !== "signedOut") {
     return (
       <FailedEntry message="This authorization request cannot create or authenticate an account." />
@@ -112,6 +121,27 @@ function ConnectorAuthenticationEntry({ invitation }: { invitation: string | und
     return <UnavailableInvitation message="This invitation is unavailable." />;
   }
   return <AccountEntry account={entry} />;
+}
+
+function resumeExecution(state: AccountState, search: URLSearchParams | undefined) {
+  if (state.status === "signedOut" || search === undefined) return undefined;
+  const id = parseExecutionLinkId(search.get("openExecution"));
+  if (id === undefined) return undefined;
+  return <ResumeExecution id={id} showRun={search.get("view") === "run"} />;
+}
+
+function ResumeExecution({ id, showRun }: { id: string; showRun: boolean }) {
+  const params = useMemo(() => ({ executionId: id }), [id]);
+  const search = useMemo((): { view?: "run" } => (showRun ? { view: "run" } : {}), [showRun]);
+  return (
+    <Navigate
+      to="/open/executions/$executionId"
+      params={params}
+      search={search}
+      reloadDocument
+      replace
+    />
+  );
 }
 
 type AuthCallback =
